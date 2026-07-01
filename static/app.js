@@ -13,8 +13,14 @@ const state = {
   episodes: [],
   episode: null,
   detail: null,
-  camera: null,
   eye: "left",
+  tiles: [],        // { camera, video, onReady } for each grid cell with video
+  master: null,     // the video element that drives the shared timeline
+  duration: 0,      // seconds; max across tiles (falls back to robot duration)
+  robotDuration: 0, // seconds from robot_data (for cursor mapping)
+  plots: [],        // { cursor, ctx, W, H } overlay canvases to animate
+  playing: false,
+  raf: null,
 };
 
 async function api(path) {
@@ -48,6 +54,7 @@ async function init() {
     const [hTask, hEp] = decodeURIComponent(location.hash.slice(1)).split("/");
     const startTask = tasks.includes(hTask) ? hTask : tasks[0];
     if (startTask) await selectTask(startTask, hEp || null);
+    if (!hEp) renderOverview();  // land on the overview when no deep link
   } catch (e) {
     toast("Failed to load tasks: " + e.message);
   }
@@ -57,9 +64,74 @@ async function init() {
     if (!b) return;
     state.eye = b.dataset.eye;
     document.querySelectorAll("#eye-toggle button").forEach((x) => x.classList.toggle("active", x === b));
-    if (state.camera) loadVideo();
+    if (state.detail) buildCameraGrid(state.detail.cameras || []);  // reload all tiles
   });
   $("#calib-head").addEventListener("click", () => $(".calib-card").classList.toggle("collapsed"));
+  $("#brand-home").addEventListener("click", showOverview);
+  $("#play-btn").addEventListener("click", togglePlay);
+  $("#scrubber").addEventListener("input", onScrub);
+}
+
+/* ---------------- Overview page ---------------- */
+
+function showOverview() {
+  stopPlayback();
+  state.episode = null;
+  location.hash = "";
+  renderEpisodeList();
+  $("#episode-view").classList.add("hidden");
+  $("#overview-view").classList.remove("hidden");
+  renderOverview();
+}
+
+async function renderOverview() {
+  try {
+    const ov = await api("/api/overview");
+    $("#ov-path").innerHTML = "";
+    $("#ov-path").appendChild(el("div", "ov-uri", `s3://${ov.bucket}/${ov.prefix}`));
+    $("#ov-path").appendChild(el("div", "ov-region", `region ${ov.region}`));
+
+    const stats = $("#ov-stats");
+    stats.innerHTML = "";
+    const cards = [
+      [ov.num_tasks, "Tasks"],
+      [ov.num_episodes, "Episodes"],
+      [ov.stations.length, ov.stations.length === 1 ? "Station" : "Stations"],
+    ];
+    cards.forEach(([num, lbl]) => {
+      const c = el("div", "ov-stat");
+      c.appendChild(el("div", "num", String(num)));
+      c.appendChild(el("div", "lbl", lbl));
+      stats.appendChild(c);
+    });
+    if (ov.stations.length) {
+      const c = el("div", "ov-stat");
+      c.appendChild(el("div", "num", "🖥"));
+      c.appendChild(el("div", "lbl wrap", ov.stations.join(", ")));
+      stats.appendChild(c);
+    }
+
+    const maxEp = Math.max(1, ...ov.tasks.map((t) => t.episodes));
+    const list = $("#ov-task-list");
+    list.innerHTML = "";
+    $("#ov-task-hint").textContent = `${ov.num_tasks} total`;
+    ov.tasks.forEach((t) => {
+      const row = el("div", "ov-task-row");
+      row.appendChild(el("div", "t-name", t.task));
+      const bar = el("div", "t-bar");
+      const fill = el("i");
+      fill.style.width = `${(t.episodes / maxEp) * 100}%`;
+      bar.appendChild(fill);
+      row.appendChild(bar);
+      row.appendChild(el("div", "t-count", `${t.episodes} ep`));
+      const latest = t.latest ? parseEpisodeName(t.latest).when || "" : "";
+      row.appendChild(el("div", "t-latest", latest ? latest.split(" · ")[0] : ""));
+      row.onclick = () => selectTask(t.task);
+      list.appendChild(row);
+    });
+  } catch (e) {
+    toast("Failed to load overview: " + e.message);
+  }
 }
 
 async function selectTask(task, autoEpisode = null) {
@@ -105,10 +177,11 @@ function parseEpisodeName(ep) {
 /* ---------------- Episode detail ---------------- */
 
 async function selectEpisode(ep) {
+  stopPlayback();
   state.episode = ep;
   location.hash = encodeURIComponent(`${state.task}/${ep}`);
   renderEpisodeList();
-  $("#empty-state").classList.add("hidden");
+  $("#overview-view").classList.add("hidden");
   $("#episode-view").classList.remove("hidden");
   $("#ep-instruction").textContent = "Loading…";
   try {
@@ -134,71 +207,196 @@ function renderDetail(d) {
   badge.textContent = md.status || "unknown";
   badge.className = "status-badge " + (status === "success" ? "success" : status ? "failure" : "neutral");
 
-  renderCameras(d.cameras || []);
+  buildCameraGrid(d.cameras || []);
   renderMeta(md, d);
   renderPlots(d.robot);
   renderCalibration(d.calibration, d.cameras || []);
-}
-
-function renderCameras(cameras) {
-  const tabs = $("#camera-tabs");
-  tabs.innerHTML = "";
-  const usable = cameras.filter((c) => c.has_video);
-  // Prefer a scene/ego camera as the default view.
-  const preferred = usable.find((c) => /scene|ego/.test(c.name)) || usable[0];
-  state.camera = preferred ? preferred.name : null;
-
-  cameras.forEach((c) => {
-    const b = el("button", c.name === state.camera ? "active" : "", prettyCam(c.name));
-    b.disabled = !c.has_video;
-    b.title = c.has_video ? `${c.size_mb} MB` : "No recorded video (stub file)";
-    b.onclick = () => {
-      state.camera = c.name;
-      document.querySelectorAll("#camera-tabs button").forEach((x) => x.classList.remove("active"));
-      b.classList.add("active");
-      loadVideo();
-    };
-    tabs.appendChild(b);
-  });
-
-  if (state.camera) loadVideo();
-  else showVideoOverlay("No camera video available for this episode.");
 }
 
 function prettyCam(name) {
   return name.replace(/_camera$/, "").replace(/_/g, " ");
 }
 
-function showVideoOverlay(msg, spinner = false) {
-  const ov = $("#video-overlay");
-  ov.innerHTML = "";
-  if (spinner) ov.appendChild(el("div", "spinner"));
-  ov.appendChild(el("div", null, msg));
-  ov.classList.remove("hidden");
-}
-function hideVideoOverlay() { $("#video-overlay").classList.add("hidden"); }
+/* ---------------- Camera grid ---------------- */
 
-function loadVideo() {
-  const v = $("#player");
+function buildCameraGrid(cameras) {
+  stopPlayback();
+  const grid = $("#camera-grid");
+  grid.innerHTML = "";
+  state.tiles = [];
+  state.master = null;
+  state.duration = 0;
+
+  if (!cameras.length) {
+    grid.appendChild(makeCamTile(null, "No cameras recorded for this episode."));
+    return;
+  }
+
+  // One tile per camera, in a stable order. Stub cameras (no video) render a
+  // graceful placeholder rather than a broken player.
+  cameras.forEach((c) => {
+    if (c.has_video) {
+      grid.appendChild(makeVideoTile(c));
+    } else {
+      grid.appendChild(makeCamTile(c.name, "No recorded video", "stub file — header only"));
+    }
+  });
+}
+
+// A static (non-video) tile: missing camera or an error placeholder.
+function makeCamTile(name, msg, sub, isError = false) {
+  const tile = el("div", "cam-tile");
+  if (name) tile.appendChild(camLabel(name));
+  const ov = el("div", "cam-overlay" + (isError ? " err" : ""));
+  ov.appendChild(el("div", "cam-icon"));
+  ov.appendChild(el("div", "cam-msg", msg));
+  if (sub) ov.appendChild(el("div", "cam-sub", sub));
+  tile.appendChild(ov);
+  return tile;
+}
+
+function camLabel(name, dims) {
+  const lab = el("div", "cam-label", prettyCam(name));
+  if (dims) lab.appendChild(el("span", "cam-dims", dims));
+  return lab;
+}
+
+function makeVideoTile(c) {
+  const tile = el("div", "cam-tile");
+  const label = camLabel(c.name);
+  const video = document.createElement("video");
+  video.playsInline = true;
+  video.preload = "auto";
+  video.muted = true;              // required for programmatic play of many tiles
+  const overlay = el("div", "cam-overlay");
+  overlay.appendChild(el("div", "spinner"));
+  overlay.appendChild(el("div", "cam-msg", "Decoding…"));
+  overlay.appendChild(el("div", "cam-sub", "first load transcodes .svo2 → mp4"));
+
+  tile.appendChild(video);
+  tile.appendChild(label);
+  tile.appendChild(overlay);
+
   const url =
     `/api/tasks/${encodeURIComponent(state.task)}/episodes/${encodeURIComponent(state.episode)}` +
-    `/video?camera=${encodeURIComponent(state.camera)}&eye=${state.eye}`;
-  showVideoOverlay("Decoding video… first load transcodes on the server.", true);
-  $("#video-caption").textContent = `${state.camera} · ${state.eye} eye · decoding .svo2 → mp4`;
+    `/video?camera=${encodeURIComponent(c.name)}&eye=${state.eye}`;
+
+  const tileState = { camera: c.name, video, ready: false };
   const onReady = () => {
-    hideVideoOverlay();
-    $("#video-caption").textContent =
-      `${state.camera} · ${state.eye} eye · ${v.videoWidth}×${v.videoHeight}`;
+    if (tileState.ready) return;
+    tileState.ready = true;
+    overlay.classList.add("hidden");
+    label.innerHTML = "";
+    label.appendChild(document.createTextNode(prettyCam(c.name)));
+    label.appendChild(el("span", "cam-dims", `${video.videoWidth}×${video.videoHeight}`));
+    // Track the longest clip as the master timeline driver.
+    if (video.duration && video.duration > state.duration) {
+      state.duration = video.duration;
+      state.master = video;
+    }
+    if (!state.master) state.master = video;
+    updateDurationUI();
   };
-  // With +faststart MP4 the moov atom is up front, so the clip is ready to
-  // scrub/play as soon as metadata loads — hide the overlay at that point.
-  v.onloadedmetadata = onReady;
-  v.oncanplay = onReady;
-  v.onloadeddata = onReady;
-  v.onplaying = onReady;
-  v.onerror = () => showVideoOverlay("Could not decode this camera stream.");
-  v.src = url;
-  v.load();
+  video.onloadedmetadata = onReady;
+  video.oncanplay = onReady;
+  video.onloadeddata = onReady;
+  video.onerror = () => {
+    overlay.className = "cam-overlay err";
+    overlay.innerHTML = "";
+    overlay.appendChild(el("div", "cam-icon"));
+    overlay.appendChild(el("div", "cam-msg", "Could not decode this stream"));
+    overlay.appendChild(el("div", "cam-sub", c.name));
+  };
+  video.src = url;
+  video.load();
+
+  state.tiles.push(tileState);
+  return tile;
+}
+
+/* ---------------- Master transport: sync all tiles + plot cursor ---------------- */
+
+function currentTime() {
+  return state.master ? state.master.currentTime : 0;
+}
+
+function timelineDuration() {
+  // Prefer the video duration; fall back to the robot trajectory length.
+  return state.duration || state.robotDuration || 0;
+}
+
+function togglePlay() {
+  if (state.playing) stopPlayback();
+  else startPlayback();
+}
+
+function startPlayback() {
+  if (!state.tiles.length) return;
+  state.playing = true;
+  $("#play-btn").textContent = "❚❚";
+  // If at (or past) the end, restart from 0.
+  const dur = timelineDuration();
+  if (state.master && dur && state.master.currentTime >= dur - 0.05) {
+    seekAll(0);
+  }
+  state.tiles.forEach((t) => { if (t.ready) t.video.play().catch(() => {}); });
+  tick();
+}
+
+function stopPlayback() {
+  state.playing = false;
+  $("#play-btn").textContent = "▶";
+  state.tiles.forEach((t) => t.video.pause());
+  if (state.raf) { cancelAnimationFrame(state.raf); state.raf = null; }
+}
+
+function seekAll(seconds) {
+  state.tiles.forEach((t) => {
+    if (t.ready) { try { t.video.currentTime = seconds; } catch (_) {} }
+  });
+}
+
+function onScrub(ev) {
+  const dur = timelineDuration();
+  if (!dur) return;
+  const wasPlaying = state.playing;
+  if (wasPlaying) stopPlayback();
+  const secs = (ev.target.value / 1000) * dur;
+  seekAll(secs);
+  updateTransportUI(secs);
+  drawAllCursors(secs);
+  if (wasPlaying) startPlayback();
+}
+
+// Per-frame loop while playing: advance scrubber + move plot cursors in lockstep.
+function tick() {
+  if (!state.playing) return;
+  const dur = timelineDuration();
+  const t = currentTime();
+  updateTransportUI(t);
+  drawAllCursors(t);
+  // Master clip ended -> stop and pin at the end.
+  if (state.master && dur && state.master.ended) {
+    stopPlayback();
+    updateTransportUI(dur);
+    drawAllCursors(dur);
+    return;
+  }
+  state.raf = requestAnimationFrame(tick);
+}
+
+function updateDurationUI() {
+  updateTransportUI(currentTime());
+}
+
+function updateTransportUI(secs) {
+  const dur = timelineDuration();
+  const label = dur ? `${secs.toFixed(1)}s / ${dur.toFixed(1)}s` : `${secs.toFixed(1)}s`;
+  $("#time-label").textContent = label;
+  const sc = $("#scrubber");
+  if (dur && document.activeElement !== sc) {
+    sc.value = String(Math.round((secs / dur) * 1000));
+  }
 }
 
 function renderMeta(md, d) {
@@ -233,12 +431,15 @@ const PALETTE = ["#6ea8fe", "#f472b6", "#4ade80", "#fbbf24", "#a78bfa", "#22d3ee
 function renderPlots(robot) {
   const wrap = $("#plots");
   wrap.innerHTML = "";
+  state.plots = [];
+  state.robotDuration = 0;
   if (!robot || !robot.signals) {
     $("#plot-summary").textContent = "";
     wrap.appendChild(el("div", "subtle", "No robot_data.npz for this episode."));
     return;
   }
   const s = robot.summary || {};
+  state.robotDuration = s.duration_s || 0;
   $("#plot-summary").textContent =
     [s.num_steps != null ? `${s.num_steps} steps` : null,
      s.duration_s != null ? `${s.duration_s}s` : null,
@@ -255,12 +456,51 @@ function renderPlots(robot) {
     title.appendChild(el("span", null, prettySignal(key)));
     title.appendChild(el("span", "range", `[${sig.min}, ${sig.max}]`));
     block.appendChild(title);
-    const canvas = el("canvas");
-    block.appendChild(canvas);
+
+    // Two stacked canvases: static series underneath, thin playback cursor on top.
+    const wrapC = el("div", "plot-canvas-wrap");
+    const series = el("canvas", "plot-series");
+    const cursor = el("canvas", "plot-cursor");
+    wrapC.appendChild(series);
+    wrapC.appendChild(cursor);
+    block.appendChild(wrapC);
     if (sig.dims > 1) block.appendChild(makeLegend(sig.dims));
     wrap.appendChild(block);
-    // defer draw so canvas has layout dimensions
-    requestAnimationFrame(() => drawSeries(canvas, t, sig));
+
+    // defer draw so canvases have layout dimensions
+    requestAnimationFrame(() => {
+      drawSeries(series, t, sig);
+      const c = sizeCanvas(cursor);
+      state.plots.push(c);
+    });
+  });
+}
+
+// Size a canvas to its box (DPR-aware) and return a handle for cursor drawing.
+function sizeCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(dpr, dpr);
+  return { canvas, ctx, W, H };
+}
+
+const PLOT_PAD = { l: 6, r: 6 };  // must match drawSeries horizontal padding
+
+// Draw the vertical playback cursor on every plot at time `secs`.
+function drawAllCursors(secs) {
+  const dur = timelineDuration();
+  const frac = dur > 0 ? Math.min(1, Math.max(0, secs / dur)) : 0;
+  state.plots.forEach((p) => {
+    p.ctx.clearRect(0, 0, p.W, p.H);
+    const x = PLOT_PAD.l + frac * (p.W - PLOT_PAD.l - PLOT_PAD.r);
+    p.ctx.strokeStyle = "rgba(110,168,254,0.9)";
+    p.ctx.lineWidth = 1.5;
+    p.ctx.beginPath();
+    p.ctx.moveTo(x, 0);
+    p.ctx.lineTo(x, p.H);
+    p.ctx.stroke();
   });
 }
 

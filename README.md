@@ -69,11 +69,23 @@ Then open `http://<host-ip>:8080/`. Episode links are shareable via the URL hash
 
 | Endpoint | Returns |
 | --- | --- |
+| `GET /api/overview` | dataset-wide summary: task/episode counts, stations, per-task breakdown |
 | `GET /api/tasks` | task folder names |
 | `GET /api/tasks/{task}/episodes` | episode folder names (newest first) |
 | `GET /api/tasks/{task}/episodes/{episode}` | metadata + calibration + camera list + robot trajectory summary |
 | `GET /api/tasks/{task}/episodes/{episode}/video?camera=&eye=left\|right` | decoded MP4 (transcodes + caches on first request) |
 | `GET /api/health` | liveness + configured bucket/prefix |
+
+## UI
+
+- **Overview page** (landing): the S3 source path, region, and aggregate counts
+  (tasks, episodes, stations) with a per-task episode breakdown.
+- **Episode view**: all cameras in a grid (missing/stub cameras show a graceful
+  placeholder), a shared play/scrub transport driving every tile at once, a
+  metadata panel, robot trajectory plots, and a calibration summary.
+- **Synced cursor**: while the videos play, a vertical cursor line sweeps across
+  every trajectory plot in lockstep with playback time.
+- Episode links are shareable via the URL hash (`#<task>/<episode>`).
 
 ## Layout
 
@@ -86,95 +98,38 @@ raiden_viz/
   cache.py        disk cache with per-key locks + LRU eviction
   config.py       env-var configuration
 static/           self-contained frontend (no build step)
-Dockerfile        python:3.12-slim + ffmpeg + gunicorn
-docker-compose*.yml   local-build and prod-ECR compose files
-gunicorn.conf.py  gunicorn + UvicornWorker production config
-.github/workflows/    CI: build on push, push to ECR on main
 ```
 
 ## Hosting for others (TRI-internal)
 
-This follows the same pattern as [AnyFile](https://github.com/TRI-ML/AnyFile):
-a Docker image is pushed to ECR by CI, then run on an internal EC2 host that
-TRI users reach over the VPN by an `*.awsinternal.tri.global` name.
+It's deployed on **`aws-anthony-1`** (`10.161.51.218`, an EC2 box in the
+TRI-internal AWS VPC) so anyone on the TRI network/VPN can reach it directly:
 
-> **Networking reality:** this app binds `0.0.0.0` and has no firewall in its
-> way, but the box it's developed on (`puget`, `10.110.20.242`) is on the
-> compute subnet, which laptops off that subnet / VPN pool can't route to.
-> That's why "share the internal IP" doesn't reach everyone — hosting on a
-> VPN-routable EC2 host (below) is what makes it broadly accessible.
-
-### Run it in Docker locally (verify the image)
-
-TRI laptops authenticate to AWS via **SSO**, not static keys, so first resolve
-the current session into env vars (this also covers `~/.aws` profiles and plain
-env creds), then build:
-
-```bash
-eval "$(aws configure export-credentials --format env)"
-docker compose -f docker-compose-local.yml up --build
-# -> http://localhost:8080/
+```
+http://10.161.51.218:8080/
 ```
 
-If `docker` needs root on your box (you're not in the `docker` group), use
-`sudo -E` so the exported creds survive into the sudo environment:
+That box works because it (a) sits on the VPN-routable `10.161.x` network — the
+puget dev box is on the compute subnet that laptops/VPN can't route to — and
+(b) has an IAM role that already reads `tri-ml-datasets-uw2`, so no credentials
+are needed on the host.
+
+**How it's run there** — a `systemd --user` service (survives reboot via linger):
 
 ```bash
-eval "$(aws configure export-credentials --format env)"
-sudo -E docker compose -f docker-compose-local.yml up --build
+# manage it on the box:
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+systemctl --user status  raiden-viz
+systemctl --user restart raiden-viz
 ```
 
-If your sudoers config strips the env anyway, inline the export instead:
+**To push a code update** from this repo:
 
 ```bash
-sudo docker compose -f docker-compose-local.yml build   # build needs no creds
-eval "$(aws configure export-credentials --format env)"
-sudo AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-     AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-     AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
-     docker compose -f docker-compose-local.yml up
+rsync -az --delete --exclude '.venv/' --exclude '.git/' --exclude '__pycache__/' \
+  ./ aws-anthony-1:~/raiden_viz/
+ssh aws-anthony-1 'export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user restart raiden-viz'
 ```
 
-SSO session creds are temporary (typically a few hours); re-run the `eval` and
-restart the container when they expire.
-
-A cold video request downloads the `.svo2` from S3 and transcodes with the
-ffmpeg baked into the image; subsequent requests are served from the cache
-volume.
-
-### Deploy to EC2 via ECR (production)
-
-CI (`.github/workflows/docker-image-ecr.yml`) builds on every push and, on
-`main`, pushes `latest` + `sha-<commit>` to ECR in `us-west-2`. To roll it out:
-
-```bash
-# On the EC2 host:
-aws ecr get-login-password --region us-west-2 \
-  | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com
-
-export RAIDEN_IMAGE=<ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/raiden-viz:latest
-docker compose pull && docker compose up -d
-```
-
-The prod `docker-compose.yml` mounts a persistent volume at `/data/cache` and
-relies on the instance's IAM role for S3 access (no creds in the file).
-
-### ⚠️ Steps that need a human with infra access (I can't do these)
-
-These require credentials/permissions the dev environment doesn't have:
-
-1. **ECR repo** — create `raiden-viz` in the target AWS account (`us-west-2`).
-   Confirm the `AWS_ACCOUNT_ID` in the CI workflow (it defaults to AnyFile's
-   `682769330988` — change if raiden-viz lives elsewhere).
-2. **CI OIDC role** — ensure `TRI-Actions/get-aws-credentials` can assume a role
-   with ECR push rights for this repo (same mechanism AnyFile uses).
-3. **EC2 host** — an instance whose IAM role can read `tri-ml-datasets-uw2`,
-   with your SSH key added (AnyFile's README says contact **sunny.sun@tri.global**
-   or **basile**). Install Docker + compose, clone this repo, run the commands above.
-4. **Internal DNS** — a record like `raiden-viz.us-west-2.awsinternal.tri.global`
-   pointing at the instance (front with HTTPS/nginx as AnyFile does).
-
-Everything in the repo (Dockerfile, compose, CI, gunicorn) is written and
-verified as far as is possible without Docker-daemon or AWS-infra access:
-the exact container command (`gunicorn ... -c gunicorn.conf.py`) has been run
-locally and confirmed to serve the UI and decode video end-to-end.
+Port 8080 is open on the instance's security group to internal CIDRs
+(`10.0.0.0/8`, `172.16.0.0/12`) only — not the public internet.

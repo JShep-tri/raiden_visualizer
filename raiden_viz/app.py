@@ -1,6 +1,6 @@
 """FastAPI application: browse raw Raiden datasets on S3 and stream decoded video."""
 
-import os
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -12,25 +12,7 @@ from . import cache, config, robot_data, s3, svo
 app = FastAPI(title="Raiden Dataset Viewer", version="0.1.0")
 
 
-def _find_static() -> Path:
-    """Locate the frontend directory. Normally it sits beside the package
-    (repo root / Docker WORKDIR), but a non-editable install can import the
-    package from site-packages, so also honor an explicit override and the CWD."""
-    candidates = [
-        Path(p) for p in [
-            os.environ.get("RAIDEN_STATIC_DIR", ""),
-            Path(__file__).resolve().parent.parent / "static",
-            Path.cwd() / "static",
-        ] if p
-    ]
-    for c in candidates:
-        if c.is_dir():
-            return c
-    # Fall back to the conventional location; StaticFiles will error loudly if absent.
-    return Path(__file__).resolve().parent.parent / "static"
-
-
-_STATIC = _find_static()
+_STATIC = Path(__file__).resolve().parent.parent / "static"
 
 
 def _episode_prefix(task: str, episode: str) -> str:
@@ -41,6 +23,45 @@ def _episode_prefix(task: str, episode: str) -> str:
 def list_tasks():
     """Task folders directly under the dataset root."""
     return {"tasks": s3.list_dirs(config.S3_PREFIX)}
+
+
+@app.get("/api/overview")
+def overview():
+    """Aggregate summary of the whole dataset root: tasks, episode counts, and
+    the stations seen (parsed from episode folder names). One S3 list per task,
+    so it stays fast without opening any episode."""
+    tasks = s3.list_dirs(config.S3_PREFIX)
+    per_task = []
+    total_episodes = 0
+    stations: set[str] = set()
+    for task in tasks:
+        episodes = s3.list_dirs(f"{config.S3_PREFIX}/{task}")
+        total_episodes += len(episodes)
+        latest = None
+        for ep in episodes:
+            # Folder names look like "russet_2026-06-30T17-19-12.764258"; the
+            # station is the prefix before the ISO timestamp. Some episodes use
+            # a plain index like "0000" — those carry no station.
+            m = re.match(r"^([A-Za-z][\w-]*)_\d{4}-\d{2}-\d{2}T", ep)
+            if m:
+                stations.add(m.group(1))
+            if latest is None or ep > latest:
+                latest = ep
+        per_task.append({
+            "task": task,
+            "episodes": len(episodes),
+            "latest": latest,
+        })
+    per_task.sort(key=lambda t: t["episodes"], reverse=True)
+    return {
+        "bucket": config.S3_BUCKET,
+        "prefix": config.S3_PREFIX,
+        "region": config.AWS_REGION,
+        "num_tasks": len(tasks),
+        "num_episodes": total_episodes,
+        "stations": sorted(stations),
+        "tasks": per_task,
+    }
 
 
 @app.get("/api/tasks/{task}/episodes")

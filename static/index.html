@@ -11,7 +11,7 @@
 </head>
 <body>
   <aside id="sidebar">
-    <div class="brand">
+    <div class="brand" id="brand-home" title="Dataset overview">
       <div class="brand-mark"></div>
       <div>
         <div class="brand-title">Raiden Viewer</div>
@@ -39,12 +39,27 @@
   </aside>
 
   <main id="main">
-    <div id="empty-state" class="empty">
-      <div class="empty-icon"></div>
-      <h2>Select an episode</h2>
-      <p>Pick a task and episode from the left to inspect its video, metadata, and robot trajectories.</p>
+    <!-- Overview / landing page: dataset-wide summary -->
+    <div id="overview-view">
+      <header class="ov-header">
+        <h1>Dataset overview</h1>
+        <p class="subtle">Raw Raiden teleop episodes — video, metadata, and robot trajectories.</p>
+      </header>
+
+      <section class="card ov-path-card">
+        <div class="card-head"><h3>Source</h3></div>
+        <div class="ov-path-body" id="ov-path"></div>
+      </section>
+
+      <div class="ov-stats" id="ov-stats"></div>
+
+      <section class="card">
+        <div class="card-head"><h3>Tasks</h3><span id="ov-task-hint" class="subtle mono"></span></div>
+        <div class="ov-task-list" id="ov-task-list"></div>
+      </section>
     </div>
 
+    <!-- Episode detail -->
     <div id="episode-view" class="hidden">
       <header id="ep-header">
         <div class="ep-heading">
@@ -61,20 +76,20 @@
       <div class="content-grid">
         <section class="card video-card">
           <div class="card-head">
-            <h3>Camera</h3>
+            <h3>Cameras</h3>
             <div class="controls">
-              <div id="camera-tabs" class="tabs"></div>
               <div id="eye-toggle" class="seg">
                 <button data-eye="left" class="active">Left</button>
                 <button data-eye="right">Right</button>
               </div>
             </div>
           </div>
-          <div class="video-stage">
-            <video id="player" controls playsinline preload="auto"></video>
-            <div id="video-overlay" class="video-overlay hidden"></div>
+          <div id="camera-grid" class="camera-grid"></div>
+          <div class="transport" id="transport">
+            <button id="play-btn" class="play-btn" title="Play / pause">▶</button>
+            <input id="scrubber" class="scrubber" type="range" min="0" max="1000" value="0" step="1" />
+            <span id="time-label" class="time-label mono">0.0s</span>
           </div>
-          <div id="video-caption" class="video-caption mono"></div>
         </section>
 
         <section class="card meta-card">
