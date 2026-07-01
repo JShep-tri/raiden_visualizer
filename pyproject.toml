@@ -10,6 +10,7 @@ dependencies = [
     "boto3>=1.34",
     "mcap>=1.1",
     "numpy>=1.24",
+    "protobuf>=4.25",
 ]
 
 [tool.setuptools]

@@ -24,6 +24,11 @@
     </div>
 
     <div class="side-section">
+      <label class="side-label" for="source-select">Dataset</label>
+      <select id="source-select"></select>
+    </div>
+
+    <div class="side-section">
       <label class="side-label" for="task-select">Task</label>
       <select id="task-select"></select>
     </div>
@@ -128,6 +133,11 @@
             <div id="plot-summary" class="mono subtle"></div>
           </div>
           <div id="plots"></div>
+        </section>
+
+        <section class="card annotations-card hidden" id="annotations-card">
+          <div class="card-head"><h3>Subtask annotations</h3></div>
+          <div id="annotations-body" class="annotations-body"></div>
         </section>
 
         <section class="card calib-card">

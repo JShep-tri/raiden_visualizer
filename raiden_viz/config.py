@@ -10,6 +10,15 @@ S3_BUCKET = os.environ.get("RAIDEN_S3_BUCKET", "tri-ml-datasets-uw2")
 S3_PREFIX = os.environ.get("RAIDEN_S3_PREFIX", "raiden_datasets/raw").strip("/")
 AWS_REGION = os.environ.get("RAIDEN_AWS_REGION", "us-west-2")
 
+# Datasets the viewer can browse. Each has a distinct on-disk format handled by a
+# dedicated source adapter (see sources.py). "kind" selects the adapter.
+#   raiden: <prefix>/<task>/<episode>/{metadata.json, cameras/*.svo2, robot_data.npz}
+#   yam:    <prefix>/<task>/episode_<uuid>/output.mcap  (one Foxglove-protobuf MCAP)
+SOURCES = [
+    {"id": "raiden", "label": "Raiden", "kind": "raiden", "bucket": S3_BUCKET, "prefix": S3_PREFIX},
+    {"id": "yam", "label": "YAM (xdof)", "kind": "yam", "bucket": S3_BUCKET, "prefix": "yam_raw/2026_03_30_zed"},
+]
+
 # Local cache for downloaded .svo2 files and transcoded .mp4 clips. Decoding is
 # expensive, so results are memoized on disk keyed by the S3 object's ETag+size.
 # Honors CACHE_DIR (the shared convention used by other TRI viewers, e.g. AnyFile

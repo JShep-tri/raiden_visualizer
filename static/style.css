@@ -96,6 +96,7 @@ select:focus { border-color: var(--accent); }
 #episode-list li .ep-li-name { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; }
 #episode-list li .ep-li-meta { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; }
 #episode-list li.active .ep-li-meta { color: var(--accent); }
+#episode-list li.ep-li-more { color: var(--text-faint); font-style: italic; cursor: default; text-align: center; }
 
 .side-foot { font-size: 10.5px; color: var(--text-faint); border-top: 1px solid var(--border-soft); padding-top: 10px; }
 
@@ -179,7 +180,14 @@ select:focus { border-color: var(--accent); }
 .video-card { grid-column: 1; grid-row: 1; }
 .meta-card  { grid-column: 2; grid-row: 1; }
 .plot-card  { grid-column: 1 / -1; grid-row: 2; }
-.calib-card { grid-column: 1 / -1; grid-row: 3; }
+.annotations-card { grid-column: 1 / -1; grid-row: 3; }
+.calib-card { grid-column: 1 / -1; grid-row: 4; }
+
+.annotations-body { padding: 8px 16px 14px; display: flex; flex-direction: column; gap: 2px; }
+.ann-row { display: flex; gap: 14px; padding: 7px 0; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
+.ann-row:last-child { border-bottom: none; }
+.ann-t { color: var(--accent); min-width: 52px; flex: none; }
+.ann-text { color: var(--text-dim); }
 
 .card-head {
   display: flex; justify-content: space-between; align-items: center;
@@ -308,7 +316,7 @@ select:focus { border-color: var(--accent); }
 
 @media (max-width: 980px) {
   .content-grid { grid-template-columns: 1fr; }
-  .video-card, .meta-card, .plot-card, .calib-card { grid-column: 1; }
+  .video-card, .meta-card, .plot-card, .annotations-card, .calib-card { grid-column: 1; }
   .video-card { grid-row: 1; } .meta-card { grid-row: 2; }
-  .plot-card { grid-row: 3; } .calib-card { grid-row: 4; }
+  .plot-card { grid-row: 3; } .annotations-card { grid-row: 4; } .calib-card { grid-row: 5; }
 }

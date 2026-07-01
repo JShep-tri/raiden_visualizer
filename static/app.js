@@ -9,6 +9,8 @@ const el = (tag, cls, txt) => {
 };
 
 const state = {
+  source: null,
+  sources: [],
   task: null,
   episodes: [],
   episode: null,
@@ -33,6 +35,11 @@ async function api(path) {
   return r.json();
 }
 
+// All dataset endpoints are scoped to the active source.
+function apiBase() {
+  return `/api/sources/${encodeURIComponent(state.source)}`;
+}
+
 function toast(msg) {
   const t = el("div", "toast", msg);
   document.body.appendChild(t);
@@ -43,21 +50,22 @@ function toast(msg) {
 
 async function init() {
   try {
-    const health = await api("/api/health");
-    $("#s3-root").textContent = `s3://${health.bucket}/${health.prefix}`;
-    const { tasks } = await api("/api/tasks");
-    const sel = $("#task-select");
-    sel.innerHTML = "";
-    tasks.forEach((t) => sel.appendChild(new Option(t, t)));
-    sel.onchange = () => selectTask(sel.value);
-    // Restore task/episode from the URL hash (#task/episode) for shareable links.
-    const [hTask, hEp] = decodeURIComponent(location.hash.slice(1)).split("/");
-    const startTask = tasks.includes(hTask) ? hTask : tasks[0];
-    if (startTask) await selectTask(startTask, hEp || null);
-    if (!hEp) renderOverview();  // land on the overview when no deep link
+    const { sources } = await api("/api/sources");
+    state.sources = sources;
+    // Source selector in the sidebar.
+    const ssel = $("#source-select");
+    ssel.innerHTML = "";
+    sources.forEach((s) => ssel.appendChild(new Option(s.label, s.id)));
+    ssel.onchange = () => selectSource(ssel.value);
+
+    // Hash is #source/task/episode for shareable links.
+    const [hSrc, hTask, hEp] = decodeURIComponent(location.hash.slice(1)).split("/");
+    const startSrc = sources.some((s) => s.id === hSrc) ? hSrc : sources[0]?.id;
+    await selectSource(startSrc, hTask || null, hEp || null);
   } catch (e) {
-    toast("Failed to load tasks: " + e.message);
+    toast("Failed to load sources: " + e.message);
   }
+  $("#task-select").onchange = (ev) => selectTask(ev.target.value);
   $("#episode-search").addEventListener("input", renderEpisodeList);
   $("#eye-toggle").addEventListener("click", (ev) => {
     const b = ev.target.closest("button");
@@ -72,12 +80,34 @@ async function init() {
   $("#scrubber").addEventListener("input", onScrub);
 }
 
-/* ---------------- Overview page ---------------- */
+/* ---------------- Source + overview ---------------- */
+
+async function selectSource(sid, autoTask = null, autoEpisode = null) {
+  state.source = sid;
+  state.episode = null;
+  $("#source-select").value = sid;
+  try {
+    const { tasks } = await api(`${apiBase()}/tasks`);
+    const sel = $("#task-select");
+    sel.innerHTML = "";
+    tasks.forEach((t) => sel.appendChild(new Option(t, t)));
+    const startTask = tasks.includes(autoTask) ? autoTask : tasks[0];
+    if (startTask) await selectTask(startTask, autoEpisode);
+    if (!autoEpisode) showOverview();
+  } catch (e) {
+    toast("Failed to load source: " + e.message);
+  }
+}
+
+function updateHash() {
+  const parts = [state.source, state.task, state.episode].filter(Boolean);
+  location.hash = parts.map(encodeURIComponent).join("/");
+}
 
 function showOverview() {
   stopPlayback();
   state.episode = null;
-  location.hash = "";
+  updateHash();
   renderEpisodeList();
   $("#episode-view").classList.add("hidden");
   $("#overview-view").classList.remove("hidden");
@@ -86,7 +116,8 @@ function showOverview() {
 
 async function renderOverview() {
   try {
-    const ov = await api("/api/overview");
+    const ov = await api(`${apiBase()}/overview`);
+    $("#s3-root").textContent = `s3://${ov.bucket}/${ov.prefix}`;
     $("#ov-path").innerHTML = "";
     $("#ov-path").appendChild(el("div", "ov-uri", `s3://${ov.bucket}/${ov.prefix}`));
     $("#ov-path").appendChild(el("div", "ov-region", `region ${ov.region}`));
@@ -146,21 +177,31 @@ function taskColors(tasks) {
 }
 
 async function renderAnalytics(taskOrder) {
+  // Charts load after a separate stats fetch (can be slower on huge datasets).
+  $("#hist-hint").textContent = "loading…";
+  $("#scatter-hint").textContent = "loading…";
+  const forSource = state.source;
   let stats;
   try {
-    stats = await api("/api/stats");
+    stats = await api(`${apiBase()}/stats`);
   } catch (e) {
+    $("#hist-hint").textContent = "";
+    $("#scatter-hint").textContent = "";
     toast("Failed to load stats: " + e.message);
     return;
   }
+  if (forSource !== state.source) return;  // user switched away; drop stale result
   const eps = (stats.episodes || []).filter((e) => e.duration_s != null);
   const colors = taskColors(taskOrder || []);
 
   drawHistogram(eps);
   drawScatter(eps, colors);
 
-  $("#hist-hint").textContent = `${eps.length} episodes`;
-  $("#scatter-hint").textContent = `${eps.length} episodes`;
+  // Honestly label sampling: if the source subsampled, say so.
+  const suffix = stats.sampled ? ` (sampled of ${stats.total_episodes.toLocaleString()})` : "";
+  $("#hist-hint").textContent = `${eps.length} episodes${suffix}`;
+  const withTime = eps.filter((e) => e.timestamp).length;
+  $("#scatter-hint").textContent = withTime ? `${withTime} episodes${suffix}` : "no timestamps";
 
   // Legend for the scatter (one chip per task).
   const legend = $("#scatter-legend");
@@ -306,7 +347,7 @@ async function selectTask(task, autoEpisode = null) {
   state.task = task;
   $("#task-select").value = task;
   try {
-    const { episodes } = await api(`/api/tasks/${encodeURIComponent(task)}/episodes`);
+    const { episodes } = await api(`${apiBase()}/tasks/${encodeURIComponent(task)}/episodes`);
     state.episodes = episodes;
     renderEpisodeList();
     if (autoEpisode && episodes.includes(autoEpisode)) {
@@ -317,29 +358,41 @@ async function selectTask(task, autoEpisode = null) {
   }
 }
 
+// Episode lists can be very large (YAM tasks have >1000). Cap the rendered rows
+// so the sidebar stays responsive; the search box narrows within the full list.
+const EPISODE_RENDER_CAP = 300;
+
 function renderEpisodeList() {
   const filter = $("#episode-search").value.toLowerCase();
   const list = $("#episode-list");
   list.innerHTML = "";
-  const shown = state.episodes.filter((e) => e.toLowerCase().includes(filter));
-  $("#episode-count").textContent = shown.length;
+  const matched = state.episodes.filter((e) => e.toLowerCase().includes(filter));
+  const shown = matched.slice(0, EPISODE_RENDER_CAP);
+  $("#episode-count").textContent = matched.length;
   shown.forEach((ep) => {
     const li = el("li");
     li.classList.toggle("active", ep === state.episode);
     const parts = parseEpisodeName(ep);
-    const name = el("div", "ep-li-name", parts.name);
-    li.appendChild(name);
+    li.appendChild(el("div", "ep-li-name", parts.name));
     if (parts.when) li.appendChild(el("div", "ep-li-meta", parts.when));
     li.onclick = () => selectEpisode(ep);
     list.appendChild(li);
   });
+  if (matched.length > shown.length) {
+    const more = el("li", "ep-li-more", `+${matched.length - shown.length} more — refine search`);
+    more.style.pointerEvents = "none";
+    list.appendChild(more);
+  }
 }
 
-// Episode folders look like "russet_2026-06-30T17-19-12.764258".
+// Episode names are either "station_2026-06-30T17-19-12..." (raiden) or
+// "episode_<uuid>" (YAM). Show a readable label + timestamp when present.
 function parseEpisodeName(ep) {
   const m = ep.match(/^(.*?)_(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})/);
-  if (!m) return { name: ep, when: null };
-  return { name: m[1], when: `${m[2]} · ${m[3]}:${m[4]}:${m[5]}` };
+  if (m) return { name: m[1], when: `${m[2]} · ${m[3]}:${m[4]}:${m[5]}` };
+  const u = ep.match(/^episode_([0-9a-f]{8})/);
+  if (u) return { name: `episode ${u[1]}`, when: null };
+  return { name: ep, when: null };
 }
 
 /* ---------------- Episode detail ---------------- */
@@ -347,14 +400,14 @@ function parseEpisodeName(ep) {
 async function selectEpisode(ep) {
   stopPlayback();
   state.episode = ep;
-  location.hash = encodeURIComponent(`${state.task}/${ep}`);
+  updateHash();
   renderEpisodeList();
   $("#overview-view").classList.add("hidden");
   $("#episode-view").classList.remove("hidden");
   $("#ep-instruction").textContent = "Loading…";
   try {
     const detail = await api(
-      `/api/tasks/${encodeURIComponent(state.task)}/episodes/${encodeURIComponent(ep)}`
+      `${apiBase()}/tasks/${encodeURIComponent(state.task)}/episodes/${encodeURIComponent(ep)}`
     );
     state.detail = detail;
     renderDetail(detail);
@@ -366,19 +419,31 @@ async function selectEpisode(ep) {
 
 function renderDetail(d) {
   const md = d.metadata || {};
-  $("#ep-instruction").textContent = md.task_instruction || md.task_name || d.episode;
+  // instruction is a top-level field now (both sources); fall back to metadata.
+  $("#ep-instruction").textContent =
+    d.instruction || md.task_instruction || md.task_name || d.episode;
   $("#ep-task").textContent = d.task;
   $("#ep-name").textContent = d.episode;
 
-  const status = (md.status || "").toLowerCase();
+  const status = (d.status || "").toLowerCase();
   const badge = $("#ep-status");
-  badge.textContent = md.status || "unknown";
-  badge.className = "status-badge " + (status === "success" ? "success" : status ? "failure" : "neutral");
+  if (d.status) {
+    badge.textContent = d.status;
+    badge.className = "status-badge " + (status === "success" ? "success" : "failure");
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");  // YAM episodes carry no status
+  }
+
+  // Eye toggle only applies to stereo (raiden). Hide it when cameras are single-eye.
+  const hasStereo = (d.cameras || []).some((c) => (c.eyes || []).length > 1);
+  $("#eye-toggle").classList.toggle("hidden", !hasStereo);
 
   buildCameraGrid(d.cameras || []);
   renderMeta(md, d);
   renderPlots(d.robot);
   renderCalibration(d.calibration, d.cameras || []);
+  renderAnnotations(d.annotations || []);
 }
 
 function prettyCam(name) {
@@ -446,7 +511,7 @@ function makeVideoTile(c) {
   tile.appendChild(overlay);
 
   const url =
-    `/api/tasks/${encodeURIComponent(state.task)}/episodes/${encodeURIComponent(state.episode)}` +
+    `${apiBase()}/tasks/${encodeURIComponent(state.task)}/episodes/${encodeURIComponent(state.episode)}` +
     `/video?camera=${encodeURIComponent(c.name)}&eye=${state.eye}`;
 
   const tileState = { camera: c.name, video, ready: false };
@@ -570,15 +635,20 @@ function updateTransportUI(secs) {
 function renderMeta(md, d) {
   const grid = $("#meta-grid");
   grid.innerHTML = "";
+  const rs = (d.robot && d.robot.summary) || {};
   const rows = [
     ["Teacher", md.teacher_name],
     ["Station", md.station_name],
     ["Control", md.control],
-    ["Duration", md.duration_s != null ? `${md.duration_s.toFixed(2)} s` : null],
-    ["Robot frames", md.robot_frames],
-    ["Robot rate", md.robot_hz != null ? `${md.robot_hz} Hz` : null],
+    // Duration/frames/rate: prefer episode metadata (raiden), else robot summary (yam).
+    ["Duration", md.duration_s != null ? `${md.duration_s.toFixed(2)} s`
+                 : rs.duration_s != null ? `${rs.duration_s.toFixed(2)} s` : null],
+    ["Robot frames", md.robot_frames != null ? md.robot_frames : rs.num_steps],
+    ["Robot rate", md.robot_hz != null ? `${md.robot_hz} Hz`
+                   : rs.hz != null ? `${rs.hz} Hz` : null],
     ["Camera FPS", md.camera_fps],
-    ["Cameras", (md.cameras || []).length ? md.cameras.length : null],
+    ["Cameras", (d.cameras || []).length || null],
+    ["Subtasks", md.num_annotations || null],
     ["Timestamp", md.timestamp ? md.timestamp.replace("T", " ").slice(0, 19) : null],
     ["Converted", md.converted != null ? String(md.converted) : null],
   ];
@@ -589,6 +659,25 @@ function renderMeta(md, d) {
     const isMono = k === "Timestamp" || k === "Robot frames";
     row.appendChild(el("div", "meta-val" + (isMono ? " mono" : ""), String(val)));
     grid.appendChild(row);
+  });
+}
+
+// YAM episodes carry subtask annotations with timestamps — show them as a list.
+function renderAnnotations(anns) {
+  let card = $("#annotations-card");
+  if (!anns.length) {
+    if (card) card.classList.add("hidden");
+    return;
+  }
+  if (!card) return;  // card exists in HTML; guard for safety
+  card.classList.remove("hidden");
+  const body = $("#annotations-body");
+  body.innerHTML = "";
+  anns.forEach((a) => {
+    const row = el("div", "ann-row");
+    row.appendChild(el("span", "ann-t mono", a.t != null ? `${a.t.toFixed(1)}s` : "—"));
+    row.appendChild(el("span", "ann-text", a.text || ""));
+    body.appendChild(row);
   });
 }
 
