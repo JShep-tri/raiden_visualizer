@@ -129,9 +129,177 @@ async function renderOverview() {
       row.onclick = () => selectTask(t.task);
       list.appendChild(row);
     });
+
+    renderAnalytics(ov.tasks.map((t) => t.task));
   } catch (e) {
     toast("Failed to load overview: " + e.message);
   }
+}
+
+/* ---------------- Overview analytics charts ---------------- */
+
+// Stable per-task color for the scatter, keyed by task order.
+function taskColors(tasks) {
+  const map = {};
+  tasks.forEach((t, i) => { map[t] = PALETTE[i % PALETTE.length]; });
+  return map;
+}
+
+async function renderAnalytics(taskOrder) {
+  let stats;
+  try {
+    stats = await api("/api/stats");
+  } catch (e) {
+    toast("Failed to load stats: " + e.message);
+    return;
+  }
+  const eps = (stats.episodes || []).filter((e) => e.duration_s != null);
+  const colors = taskColors(taskOrder || []);
+
+  drawHistogram(eps);
+  drawScatter(eps, colors);
+
+  $("#hist-hint").textContent = `${eps.length} episodes`;
+  $("#scatter-hint").textContent = `${eps.length} episodes`;
+
+  // Legend for the scatter (one chip per task).
+  const legend = $("#scatter-legend");
+  legend.innerHTML = "";
+  (taskOrder || []).forEach((t) => {
+    const s = el("span");
+    const i = el("i");
+    i.style.background = colors[t];
+    s.appendChild(i);
+    s.appendChild(el("span", null, t));
+    legend.appendChild(s);
+  });
+}
+
+function setupCanvas(id) {
+  const canvas = $("#" + id);
+  const dpr = window.devicePixelRatio || 1;
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  return { ctx, W, H };
+}
+
+function niceDuration(s) {
+  return s >= 60 ? `${(s / 60).toFixed(1)}m` : `${s.toFixed(0)}s`;
+}
+
+// Histogram of episode duration (seconds).
+function drawHistogram(eps) {
+  const { ctx, W, H } = setupCanvas("hist-canvas");
+  $("#hist-axis").innerHTML = "";
+  if (!eps.length) return;
+
+  const durs = eps.map((e) => e.duration_s);
+  const lo = 0;
+  const hi = Math.max(...durs);
+  const nBins = Math.min(20, Math.max(6, Math.round(Math.sqrt(eps.length) * 2)));
+  const binW = (hi - lo) / nBins || 1;
+  const bins = new Array(nBins).fill(0);
+  durs.forEach((d) => {
+    let b = Math.floor((d - lo) / binW);
+    if (b >= nBins) b = nBins - 1;
+    if (b < 0) b = 0;
+    bins[b]++;
+  });
+  const maxCount = Math.max(...bins);
+
+  const pad = { l: 30, r: 8, t: 10, b: 8 };
+  const plotW = W - pad.l - pad.r, plotH = H - pad.t - pad.b;
+
+  // y gridlines + labels (counts)
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  ctx.fillStyle = "#626875";
+  ctx.textAlign = "right";
+  const yTicks = niceTicks(0, maxCount, 4);
+  yTicks.forEach((v) => {
+    const y = pad.t + plotH * (1 - v / (maxCount || 1));
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.fillText(String(v), pad.l - 5, y + 3);
+  });
+
+  // bars
+  const gap = 2;
+  const bw = plotW / nBins;
+  for (let i = 0; i < nBins; i++) {
+    if (!bins[i]) continue;
+    const h = plotH * (bins[i] / maxCount);
+    const x = pad.l + i * bw;
+    const y = pad.t + plotH - h;
+    ctx.fillStyle = "#6ea8fe";
+    ctx.fillRect(x + gap / 2, y, bw - gap, h);
+  }
+
+  // x-axis labels (min / mid / max duration)
+  const axis = $("#hist-axis");
+  [lo, lo + (hi - lo) / 2, hi].forEach((v) => axis.appendChild(el("span", null, niceDuration(v))));
+}
+
+// Scatter: episode duration (y) vs recorded wallclock time (x), colored by task.
+function drawScatter(eps, colors) {
+  const { ctx, W, H } = setupCanvas("scatter-canvas");
+  $("#scatter-axis").innerHTML = "";
+  const pts = eps
+    .filter((e) => e.timestamp)
+    .map((e) => ({ t: Date.parse(e.timestamp), y: e.duration_s, task: e.task, ep: e.episode }))
+    .filter((p) => !isNaN(p.t));
+  if (!pts.length) return;
+
+  const tMin = Math.min(...pts.map((p) => p.t));
+  const tMax = Math.max(...pts.map((p) => p.t));
+  const yMax = Math.max(...pts.map((p) => p.y));
+  const tSpan = tMax - tMin || 1;
+
+  const pad = { l: 30, r: 8, t: 10, b: 8 };
+  const plotW = W - pad.l - pad.r, plotH = H - pad.t - pad.b;
+  const X = (t) => pad.l + ((t - tMin) / tSpan) * plotW;
+  const Y = (y) => pad.t + plotH * (1 - y / (yMax || 1));
+
+  // y gridlines (duration)
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  ctx.textAlign = "right";
+  niceTicks(0, yMax, 4).forEach((v) => {
+    const y = Y(v);
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.fillStyle = "#626875";
+    ctx.fillText(niceDuration(v), pad.l - 5, y + 3);
+  });
+
+  // points
+  pts.forEach((p) => {
+    ctx.fillStyle = colors[p.task] || "#6ea8fe";
+    ctx.beginPath();
+    ctx.arc(X(p.t), Y(p.y), 4, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // x-axis labels (dates)
+  const fmt = (ms) => {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const axis = $("#scatter-axis");
+  [tMin, tMin + tSpan / 2, tMax].forEach((t) => axis.appendChild(el("span", null, fmt(t))));
+}
+
+// Produce up to `count` "nice" round tick values between lo and hi.
+function niceTicks(lo, hi, count) {
+  if (hi <= lo) return [0];
+  const raw = (hi - lo) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag;
+  const ticks = [];
+  for (let v = 0; v <= hi + 1e-9; v += step) ticks.push(Math.round(v * 100) / 100);
+  return ticks;
 }
 
 async function selectTask(task, autoEpisode = null) {

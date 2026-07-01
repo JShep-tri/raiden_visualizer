@@ -53,6 +53,31 @@
 
       <div class="ov-stats" id="ov-stats"></div>
 
+      <div class="ov-charts">
+        <section class="card">
+          <div class="card-head">
+            <h3>Episode length</h3>
+            <span id="hist-hint" class="subtle mono"></span>
+          </div>
+          <div class="chart-body">
+            <div class="chart-wrap"><canvas id="hist-canvas"></canvas></div>
+            <div class="chart-axis" id="hist-axis"></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="card-head">
+            <h3>Episode length vs. recorded time</h3>
+            <span id="scatter-hint" class="subtle mono"></span>
+          </div>
+          <div class="chart-body">
+            <div class="chart-wrap"><canvas id="scatter-canvas"></canvas></div>
+            <div class="chart-axis" id="scatter-axis"></div>
+            <div class="chart-legend" id="scatter-legend"></div>
+          </div>
+        </section>
+      </div>
+
       <section class="card">
         <div class="card-head"><h3>Tasks</h3><span id="ov-task-hint" class="subtle mono"></span></div>
         <div class="ov-task-list" id="ov-task-list"></div>

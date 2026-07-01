@@ -64,6 +64,53 @@ def overview():
     }
 
 
+def _episode_stat(task: str, episode: str) -> dict | None:
+    """Read one episode's metadata.json into a compact stats record."""
+    md = s3.get_json(f"{config.S3_PREFIX}/{task}/{episode}/metadata.json")
+    return {
+        "task": task,
+        "episode": episode,
+        "duration_s": md.get("duration_s"),
+        "robot_frames": md.get("robot_frames"),
+        "robot_hz": md.get("robot_hz"),
+        "camera_fps": md.get("camera_fps"),
+        "num_cameras": len(md.get("cameras", [])),
+        "status": md.get("status"),
+        "teacher": md.get("teacher_name"),
+        "station": md.get("station_name"),
+        "timestamp": md.get("timestamp"),  # ISO recorded (wallclock) time
+    }
+
+
+@app.get("/api/stats")
+def stats():
+    """Per-episode metadata across the whole dataset, for analytics charts.
+
+    Reads every episode's metadata.json (concurrently, since it's one small S3
+    GET each). An episode whose metadata can't be read is skipped."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    tasks = s3.list_dirs(config.S3_PREFIX)
+    pairs: list[tuple[str, str]] = []
+    for task in tasks:
+        for ep in s3.list_dirs(f"{config.S3_PREFIX}/{task}"):
+            pairs.append((task, ep))
+
+    episodes: list[dict] = []
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        futures = [pool.submit(_episode_stat, t, e) for t, e in pairs]
+        for f in futures:
+            try:
+                rec = f.result()
+            except Exception:
+                rec = None  # unreadable metadata -> skip this episode
+            if rec:
+                episodes.append(rec)
+
+    episodes.sort(key=lambda e: e.get("timestamp") or "")
+    return {"num_episodes": len(episodes), "episodes": episodes}
+
+
 @app.get("/api/tasks/{task}/episodes")
 def list_episodes(task: str):
     """Episode folders under a task, newest first (names are timestamped)."""
