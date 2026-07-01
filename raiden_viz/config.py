@@ -17,6 +17,10 @@ AWS_REGION = os.environ.get("RAIDEN_AWS_REGION", "us-west-2")
 SOURCES = [
     {"id": "raiden", "label": "Raiden", "kind": "raiden", "bucket": S3_BUCKET, "prefix": S3_PREFIX},
     {"id": "yam", "label": "YAM (xdof)", "kind": "yam", "bucket": S3_BUCKET, "prefix": "yam_raw/2026_03_30_zed"},
+    # YAM teleop recorded on the russet station, uploaded from ~/data/raw. Same
+    # raiden .svo2 layout (metadata.json + cameras/*.svo2 + robot_data.npz), so it
+    # uses the raiden adapter.
+    {"id": "yam_russet", "label": "YAM (russet)", "kind": "raiden", "bucket": S3_BUCKET, "prefix": "yam_datasets/raw"},
 ]
 
 # Local cache for downloaded .svo2 files and transcoded .mp4 clips. Decoding is
