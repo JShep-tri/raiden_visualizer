@@ -1,0 +1,20 @@
+[project]
+name = "raiden-viz"
+version = "0.1.0"
+description = "Web viewer for raw Raiden robot teleop datasets stored on S3 (ZED .svo2 + robot_data.npz)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "boto3>=1.34",
+    "mcap>=1.1",
+    "numpy>=1.24",
+]
+
+[tool.setuptools]
+packages = ["raiden_viz"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"

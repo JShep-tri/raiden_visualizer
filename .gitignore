@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+raiden_viz_cache/
+*.svo2
+*.mp4
+*.h264
+.DS_Store

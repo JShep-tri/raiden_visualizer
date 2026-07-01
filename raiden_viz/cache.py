@@ -1,0 +1,66 @@
+"""Disk cache for downloaded .svo2 files and transcoded .mp4 clips.
+
+Keyed by S3 ETag so a re-uploaded object transparently invalidates. A simple
+size-based LRU eviction keeps the cache bounded.
+"""
+
+import threading
+import time
+from pathlib import Path
+
+from . import config
+
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+def _lock_for(key: str) -> threading.Lock:
+    """Return a per-key lock so concurrent requests for the same clip wait
+    rather than decoding the same file multiple times."""
+    with _locks_guard:
+        if key not in _locks:
+            _locks[key] = threading.Lock()
+        return _locks[key]
+
+
+def path_for(name: str) -> Path:
+    return config.CACHE_DIR / name
+
+
+def get_or_create(cache_name: str, produce) -> Path:
+    """Return cached file at ``cache_name``, invoking ``produce(path)`` to
+    build it on a miss. ``produce`` must write the file at the given path."""
+    dest = path_for(cache_name)
+    if dest.exists() and dest.stat().st_size > 0:
+        dest.touch()  # bump mtime for LRU
+        return dest
+
+    lock = _lock_for(cache_name)
+    with lock:
+        # Re-check inside the lock (another thread may have produced it).
+        if dest.exists() and dest.stat().st_size > 0:
+            return dest
+        tmp = dest.with_suffix(dest.suffix + f".tmp{int(time.time()*1000)%100000}")
+        produce(tmp)
+        tmp.replace(dest)
+    _maybe_evict()
+    return dest
+
+
+def _maybe_evict() -> None:
+    if config.CACHE_MAX_GB <= 0:
+        return
+    files = [p for p in config.CACHE_DIR.glob("*") if p.is_file()]
+    total = sum(p.stat().st_size for p in files)
+    limit = config.CACHE_MAX_GB * (1024**3)
+    if total <= limit:
+        return
+    # Evict oldest-accessed first.
+    for p in sorted(files, key=lambda x: x.stat().st_mtime):
+        try:
+            total -= p.stat().st_size
+            p.unlink()
+        except OSError:
+            continue
+        if total <= limit:
+            break

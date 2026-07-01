@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Raiden Dataset Viewer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div>
+        <div class="brand-title">Raiden Viewer</div>
+        <div class="brand-sub">raw teleop datasets</div>
+      </div>
+    </div>
+
+    <div class="search-wrap">
+      <input id="episode-search" type="text" placeholder="Filter episodes…" autocomplete="off" />
+    </div>
+
+    <div class="side-section">
+      <label class="side-label" for="task-select">Task</label>
+      <select id="task-select"></select>
+    </div>
+
+    <div class="side-section grow">
+      <label class="side-label">Episodes <span id="episode-count" class="pill"></span></label>
+      <ul id="episode-list"></ul>
+    </div>
+
+    <div class="side-foot">
+      <span id="s3-root" class="mono"></span>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div id="empty-state" class="empty">
+      <div class="empty-icon"></div>
+      <h2>Select an episode</h2>
+      <p>Pick a task and episode from the left to inspect its video, metadata, and robot trajectories.</p>
+    </div>
+
+    <div id="episode-view" class="hidden">
+      <header id="ep-header">
+        <div class="ep-heading">
+          <h1 id="ep-instruction">—</h1>
+          <div class="ep-crumbs">
+            <span id="ep-task" class="crumb"></span>
+            <span class="crumb-sep">/</span>
+            <span id="ep-name" class="crumb mono"></span>
+          </div>
+        </div>
+        <div id="ep-status" class="status-badge"></div>
+      </header>
+
+      <div class="content-grid">
+        <section class="card video-card">
+          <div class="card-head">
+            <h3>Camera</h3>
+            <div class="controls">
+              <div id="camera-tabs" class="tabs"></div>
+              <div id="eye-toggle" class="seg">
+                <button data-eye="left" class="active">Left</button>
+                <button data-eye="right">Right</button>
+              </div>
+            </div>
+          </div>
+          <div class="video-stage">
+            <video id="player" controls playsinline preload="auto"></video>
+            <div id="video-overlay" class="video-overlay hidden"></div>
+          </div>
+          <div id="video-caption" class="video-caption mono"></div>
+        </section>
+
+        <section class="card meta-card">
+          <div class="card-head"><h3>Metadata</h3></div>
+          <div id="meta-grid" class="meta-grid"></div>
+        </section>
+
+        <section class="card plot-card">
+          <div class="card-head">
+            <h3>Robot trajectories</h3>
+            <div id="plot-summary" class="mono subtle"></div>
+          </div>
+          <div id="plots"></div>
+        </section>
+
+        <section class="card calib-card">
+          <div class="card-head collapsible" id="calib-head">
+            <h3>Calibration &amp; cameras</h3>
+            <span class="chevron">▾</span>
+          </div>
+          <div id="calib-body" class="calib-body"></div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
