@@ -1,8 +1,15 @@
 # Local development / verification: builds the image from this repo.
-# AWS creds are passed through from your shell so the container can read S3.
 #
+# The container reads S3 via AWS creds passed as env vars. TRI laptops use AWS
+# SSO (not static keys), so export the current session into the env first —
+# this resolves SSO, ~/.aws profiles, or env creds uniformly:
+#
+#   eval "$(aws configure export-credentials --format env)"
 #   docker compose -f docker-compose-local.yml up --build
 #   -> open http://localhost:8080/
+#
+# (docker itself may need sudo if you're not in the 'docker' group; if so, use
+#  `sudo -E docker compose ...` so it keeps the exported creds.)
 services:
   web:
     build:

@@ -106,11 +106,37 @@ TRI users reach over the VPN by an `*.awsinternal.tri.global` name.
 
 ### Run it in Docker locally (verify the image)
 
+TRI laptops authenticate to AWS via **SSO**, not static keys, so first resolve
+the current session into env vars (this also covers `~/.aws` profiles and plain
+env creds), then build:
+
 ```bash
-# uses your shell's AWS creds to read S3
+eval "$(aws configure export-credentials --format env)"
 docker compose -f docker-compose-local.yml up --build
 # -> http://localhost:8080/
 ```
+
+If `docker` needs root on your box (you're not in the `docker` group), use
+`sudo -E` so the exported creds survive into the sudo environment:
+
+```bash
+eval "$(aws configure export-credentials --format env)"
+sudo -E docker compose -f docker-compose-local.yml up --build
+```
+
+If your sudoers config strips the env anyway, inline the export instead:
+
+```bash
+sudo docker compose -f docker-compose-local.yml build   # build needs no creds
+eval "$(aws configure export-credentials --format env)"
+sudo AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
+     AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
+     AWS_SESSION_TOKEN="$AWS_SESSION_TOKEN" \
+     docker compose -f docker-compose-local.yml up
+```
+
+SSO session creds are temporary (typically a few hours); re-run the `eval` and
+restart the container when they expire.
 
 A cold video request downloads the `.svo2` from S3 and transcodes with the
 ffmpeg baked into the image; subsequent requests are served from the cache
