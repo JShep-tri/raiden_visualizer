@@ -1,0 +1,25 @@
+# Production deployment on EC2: pulls a prebuilt image from ECR.
+# The EC2 instance's IAM role provides S3 read access (no creds in the file),
+# and the decode cache lives on a persistent EBS volume mounted at /data/cache.
+#
+#   aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin <acct>.dkr.ecr.us-west-2.amazonaws.com
+#   docker compose pull && docker compose up -d
+services:
+  web:
+    # Set RAIDEN_IMAGE to the ECR image, e.g.
+    #   <acct>.dkr.ecr.us-west-2.amazonaws.com/raiden-viz:latest
+    image: ${RAIDEN_IMAGE:-raiden-viz:latest}
+    ports:
+      - "8080:8080"
+    environment:
+      - CACHE_DIR=/app/cache
+      - RAIDEN_S3_BUCKET=${RAIDEN_S3_BUCKET:-tri-ml-datasets-uw2}
+      - RAIDEN_S3_PREFIX=${RAIDEN_S3_PREFIX:-raiden_datasets/raw}
+      - RAIDEN_AWS_REGION=${RAIDEN_AWS_REGION:-us-west-2}
+      - RAIDEN_CACHE_MAX_GB=${RAIDEN_CACHE_MAX_GB:-50}
+    volumes:
+      # host_path:container_path — point at a persistent EBS/data volume in prod.
+      - /data/cache:/app/cache
+    restart: always
+    mem_limit: 12g
+    memswap_limit: 14g

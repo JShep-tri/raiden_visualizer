@@ -86,4 +86,69 @@ raiden_viz/
   cache.py        disk cache with per-key locks + LRU eviction
   config.py       env-var configuration
 static/           self-contained frontend (no build step)
+Dockerfile        python:3.12-slim + ffmpeg + gunicorn
+docker-compose*.yml   local-build and prod-ECR compose files
+gunicorn.conf.py  gunicorn + UvicornWorker production config
+.github/workflows/    CI: build on push, push to ECR on main
 ```
+
+## Hosting for others (TRI-internal)
+
+This follows the same pattern as [AnyFile](https://github.com/TRI-ML/AnyFile):
+a Docker image is pushed to ECR by CI, then run on an internal EC2 host that
+TRI users reach over the VPN by an `*.awsinternal.tri.global` name.
+
+> **Networking reality:** this app binds `0.0.0.0` and has no firewall in its
+> way, but the box it's developed on (`puget`, `10.110.20.242`) is on the
+> compute subnet, which laptops off that subnet / VPN pool can't route to.
+> That's why "share the internal IP" doesn't reach everyone — hosting on a
+> VPN-routable EC2 host (below) is what makes it broadly accessible.
+
+### Run it in Docker locally (verify the image)
+
+```bash
+# uses your shell's AWS creds to read S3
+docker compose -f docker-compose-local.yml up --build
+# -> http://localhost:8080/
+```
+
+A cold video request downloads the `.svo2` from S3 and transcodes with the
+ffmpeg baked into the image; subsequent requests are served from the cache
+volume.
+
+### Deploy to EC2 via ECR (production)
+
+CI (`.github/workflows/docker-image-ecr.yml`) builds on every push and, on
+`main`, pushes `latest` + `sha-<commit>` to ECR in `us-west-2`. To roll it out:
+
+```bash
+# On the EC2 host:
+aws ecr get-login-password --region us-west-2 \
+  | docker login --username AWS --password-stdin <ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com
+
+export RAIDEN_IMAGE=<ACCOUNT_ID>.dkr.ecr.us-west-2.amazonaws.com/raiden-viz:latest
+docker compose pull && docker compose up -d
+```
+
+The prod `docker-compose.yml` mounts a persistent volume at `/data/cache` and
+relies on the instance's IAM role for S3 access (no creds in the file).
+
+### ⚠️ Steps that need a human with infra access (I can't do these)
+
+These require credentials/permissions the dev environment doesn't have:
+
+1. **ECR repo** — create `raiden-viz` in the target AWS account (`us-west-2`).
+   Confirm the `AWS_ACCOUNT_ID` in the CI workflow (it defaults to AnyFile's
+   `682769330988` — change if raiden-viz lives elsewhere).
+2. **CI OIDC role** — ensure `TRI-Actions/get-aws-credentials` can assume a role
+   with ECR push rights for this repo (same mechanism AnyFile uses).
+3. **EC2 host** — an instance whose IAM role can read `tri-ml-datasets-uw2`,
+   with your SSH key added (AnyFile's README says contact **sunny.sun@tri.global**
+   or **basile**). Install Docker + compose, clone this repo, run the commands above.
+4. **Internal DNS** — a record like `raiden-viz.us-west-2.awsinternal.tri.global`
+   pointing at the instance (front with HTTPS/nginx as AnyFile does).
+
+Everything in the repo (Dockerfile, compose, CI, gunicorn) is written and
+verified as far as is possible without Docker-daemon or AWS-infra access:
+the exact container command (`gunicorn ... -c gunicorn.conf.py`) has been run
+locally and confirmed to serve the UI and decode video end-to-end.

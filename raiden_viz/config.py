@@ -12,7 +12,13 @@ AWS_REGION = os.environ.get("RAIDEN_AWS_REGION", "us-west-2")
 
 # Local cache for downloaded .svo2 files and transcoded .mp4 clips. Decoding is
 # expensive, so results are memoized on disk keyed by the S3 object's ETag+size.
-CACHE_DIR = Path(os.environ.get("RAIDEN_CACHE_DIR", "/tmp/raiden_viz_cache"))
+# Honors CACHE_DIR (the shared convention used by other TRI viewers, e.g. AnyFile
+# maps a persistent EBS volume there) with RAIDEN_CACHE_DIR taking precedence.
+CACHE_DIR = Path(
+    os.environ.get("RAIDEN_CACHE_DIR")
+    or os.environ.get("CACHE_DIR")
+    or "/tmp/raiden_viz_cache"
+)
 
 HOST = os.environ.get("RAIDEN_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RAIDEN_PORT", "8080"))

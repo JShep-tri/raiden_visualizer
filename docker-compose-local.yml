@@ -1,0 +1,26 @@
+# Local development / verification: builds the image from this repo.
+# AWS creds are passed through from your shell so the container can read S3.
+#
+#   docker compose -f docker-compose-local.yml up --build
+#   -> open http://localhost:8080/
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: raiden-viz
+    ports:
+      - "8080:8080"
+    environment:
+      - CACHE_DIR=/app/cache
+      - RAIDEN_S3_BUCKET=${RAIDEN_S3_BUCKET:-tri-ml-datasets-uw2}
+      - RAIDEN_S3_PREFIX=${RAIDEN_S3_PREFIX:-raiden_datasets/raw}
+      - RAIDEN_AWS_REGION=${RAIDEN_AWS_REGION:-us-west-2}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+    volumes:
+      # Persist the decode cache across container restarts.
+      - /tmp/raiden_viz_cache:/app/cache
+    restart: always
+    mem_limit: 8g

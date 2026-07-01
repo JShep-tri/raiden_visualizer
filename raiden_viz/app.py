@@ -1,5 +1,6 @@
 """FastAPI application: browse raw Raiden datasets on S3 and stream decoded video."""
 
+import os
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -10,7 +11,26 @@ from . import cache, config, robot_data, s3, svo
 
 app = FastAPI(title="Raiden Dataset Viewer", version="0.1.0")
 
-_STATIC = Path(__file__).resolve().parent.parent / "static"
+
+def _find_static() -> Path:
+    """Locate the frontend directory. Normally it sits beside the package
+    (repo root / Docker WORKDIR), but a non-editable install can import the
+    package from site-packages, so also honor an explicit override and the CWD."""
+    candidates = [
+        Path(p) for p in [
+            os.environ.get("RAIDEN_STATIC_DIR", ""),
+            Path(__file__).resolve().parent.parent / "static",
+            Path.cwd() / "static",
+        ] if p
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    # Fall back to the conventional location; StaticFiles will error loudly if absent.
+    return Path(__file__).resolve().parent.parent / "static"
+
+
+_STATIC = _find_static()
 
 
 def _episode_prefix(task: str, episode: str) -> str:

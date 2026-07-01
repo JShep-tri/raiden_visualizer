@@ -3,7 +3,6 @@
 #
 #   ./run.sh                 # serve on 0.0.0.0:8080
 #   RAIDEN_PORT=9000 ./run.sh
-#   RAIDEN_S3_PREFIX=raiden_datasets/raw ./run.sh
 #
 # Then open http://<this-host-ip>:8080/
 set -e

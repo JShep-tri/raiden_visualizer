@@ -1,9 +1,12 @@
 """Disk cache for downloaded .svo2 files and transcoded .mp4 clips.
 
 Keyed by S3 ETag so a re-uploaded object transparently invalidates. A simple
-size-based LRU eviction keeps the cache bounded.
+size-based LRU eviction keeps the cache bounded. Writes go to a unique temp
+file and are moved into place with an atomic ``os.replace``, so a concurrent
+build can never serve a half-written file.
 """
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -40,7 +43,9 @@ def get_or_create(cache_name: str, produce) -> Path:
         # Re-check inside the lock (another thread may have produced it).
         if dest.exists() and dest.stat().st_size > 0:
             return dest
-        tmp = dest.with_suffix(dest.suffix + f".tmp{int(time.time()*1000)%100000}")
+        # Unique temp name (pid + time) so concurrent cold misses never clobber
+        # each other's partial writes before the atomic replace below.
+        tmp = dest.with_suffix(dest.suffix + f".tmp{os.getpid()}_{int(time.time()*1000)%100000}")
         produce(tmp)
         tmp.replace(dest)
     _maybe_evict()
