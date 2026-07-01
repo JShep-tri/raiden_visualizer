@@ -495,7 +495,7 @@ function drawAllCursors(secs) {
   state.plots.forEach((p) => {
     p.ctx.clearRect(0, 0, p.W, p.H);
     const x = PLOT_PAD.l + frac * (p.W - PLOT_PAD.l - PLOT_PAD.r);
-    p.ctx.strokeStyle = "rgba(110,168,254,0.9)";
+    p.ctx.strokeStyle = "rgba(248,113,113,0.95)";
     p.ctx.lineWidth = 1.5;
     p.ctx.beginPath();
     p.ctx.moveTo(x, 0);
