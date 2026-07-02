@@ -164,12 +164,17 @@ async function renderOverview() {
       bar.appendChild(fill);
       row.appendChild(bar);
       row.appendChild(el("div", "t-count", `${t.episodes} ep`));
+      // Per-task hours — filled in by updateHoursCard once /api/stats loads.
+      const hrs = el("div", "t-hours", "…");
+      hrs.dataset.task = t.task;
+      row.appendChild(hrs);
       const latest = t.latest ? parseEpisodeName(t.latest).when || "" : "";
       row.appendChild(el("div", "t-latest", latest ? latest.split(" · ")[0] : ""));
       row.onclick = () => selectTask(t.task);
       list.appendChild(row);
     });
 
+    state.overviewTasks = ov.tasks;  // per-task totals, for extrapolating hours
     renderAnalytics(ov.tasks.map((t) => t.task));
   } catch (e) {
     toast("Failed to load overview: " + e.message);
@@ -253,6 +258,32 @@ function updateHoursCard(eps, stats) {
   numEl.title = estimated
     ? `Estimated from ${durs.length} sampled episodes (mean ${(sumSecs / durs.length).toFixed(1)}s) × ${stats.total_episodes.toLocaleString()} episodes`
     : `Sum of ${durs.length} episode durations`;
+
+  updatePerTaskHours(eps, stats, estimated);
+}
+
+// Fill the per-task hours cells. For sampled sources, scale each task's own
+// sampled mean by its full episode count (from the overview's per-task totals).
+function updatePerTaskHours(eps, stats, estimated) {
+  const byTask = {};  // task -> {sum, n}
+  eps.forEach((e) => {
+    const b = byTask[e.task] || (byTask[e.task] = { sum: 0, n: 0 });
+    b.sum += e.duration_s; b.n += 1;
+  });
+  // Total episode count per task (for extrapolation) from the overview payload.
+  const totalByTask = {};
+  (state.overviewTasks || []).forEach((t) => { totalByTask[t.task] = t.episodes; });
+
+  document.querySelectorAll(".t-hours").forEach((cell) => {
+    const task = cell.dataset.task;
+    const b = byTask[task];
+    if (!b || !b.n) { cell.textContent = "—"; return; }
+    let secs = b.sum;
+    if (estimated && totalByTask[task]) secs = (b.sum / b.n) * totalByTask[task];
+    const h = secs / 3600;
+    const txt = h >= 10 ? h.toFixed(0) : h.toFixed(1);
+    cell.textContent = (estimated ? "~" : "") + txt + "h";
+  });
 }
 
 function setupCanvas(id) {

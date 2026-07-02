@@ -142,7 +142,8 @@ select:focus { border-color: var(--accent); }
 }
 .ov-task-row:hover { background: var(--bg-hover); }
 .ov-task-row .t-name { font-weight: 600; flex: 1; }
-.ov-task-row .t-count { font-size: 12px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; }
+.ov-task-row .t-count { font-size: 12px; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; min-width: 62px; text-align: right; }
+.ov-task-row .t-hours { font-size: 12px; color: var(--accent); font-family: 'JetBrains Mono', monospace; min-width: 56px; text-align: right; }
 .ov-task-row .t-bar { flex: none; width: 120px; height: 6px; background: var(--bg); border-radius: 4px; overflow: hidden; }
 .ov-task-row .t-bar i { display: block; height: 100%; background: linear-gradient(90deg,#6ea8fe,#a78bfa); }
 .ov-task-row .t-latest { font-size: 11px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; min-width: 92px; text-align: right; }
