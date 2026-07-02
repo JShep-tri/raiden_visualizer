@@ -78,6 +78,21 @@ def episode_video(sid: str, task: str, episode: str, camera: str, eye: str = Que
     return FileResponse(mp4, media_type="video/mp4", filename=f"{camera}_{eye}.mp4")
 
 
+@app.get("/api/sources/{sid}/tasks/{task}/episodes/{episode}/calib")
+def episode_calib(sid: str, task: str, episode: str, camera: str):
+    """Calibration-check overlay: arm-base frames projected onto a still frame."""
+    src = _src(sid)
+    if not hasattr(src, "calib_overlay_path"):
+        raise HTTPException(422, "calibration overlay not supported for this source")
+    try:
+        png = src.calib_overlay_path(task, episode, camera)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return FileResponse(png, media_type="image/png", filename=f"{camera}_calib.png")
+
+
 @app.exception_handler(Exception)
 async def _unhandled(_request, exc: Exception):
     return JSONResponse(status_code=500, content={"error": str(exc)})

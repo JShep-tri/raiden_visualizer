@@ -933,8 +933,30 @@ function renderCalibration(calib, cameras) {
       kv(box, "size", c.intrinsics.image_size.join("×"));
     }
     if (c.serial_number) kv(box, "serial", String(c.serial_number));
+    // Calibration check: only scene-type cameras carry base-frame extrinsics we
+    // can project. A button renders the arm-base axes onto a still frame.
+    if (c.extrinsics) {
+      const btn = el("button", "calib-check-btn", "Check alignment");
+      const holder = el("div", "calib-overlay-holder");
+      btn.onclick = () => loadCalibOverlay(name, btn, holder);
+      box.appendChild(btn);
+      box.appendChild(holder);
+    }
     body.appendChild(box);
   });
+}
+
+// Load the calibration overlay image for one camera into its holder.
+function loadCalibOverlay(camera, btn, holder) {
+  btn.disabled = true;
+  btn.textContent = "Rendering…";
+  const url = `${apiBase()}/tasks/${encodeURIComponent(state.task)}` +
+    `/episodes/${encodeURIComponent(state.episode)}/calib?camera=${encodeURIComponent(camera)}`;
+  const img = new Image();
+  img.className = "calib-overlay-img";
+  img.onload = () => { holder.innerHTML = ""; holder.appendChild(img); btn.textContent = "Refresh"; btn.disabled = false; };
+  img.onerror = () => { btn.textContent = "Check alignment"; btn.disabled = false; toast("Could not render overlay for " + camera); };
+  img.src = url + `&_=${state.episode}`;  // cache-key stable per episode
 }
 
 function kv(parent, k, v) {

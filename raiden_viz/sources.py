@@ -21,7 +21,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import cache, robot_data, s3, svo, yam
+from . import cache, calib_overlay, robot_data, s3, svo, yam
 
 
 class Source:
@@ -168,6 +168,33 @@ class RaidenSource(Source):
             f"{obj.etag}_{camera}_{eye}.mp4",
             lambda dst: svo.decode_to_mp4(svo_local, dst, eye=eye),
         )
+
+    def calib_overlay_path(self, task, episode, camera):
+        """Render a calibration-check overlay (arm-base axis triads projected onto
+        a still frame of `camera`). Only works for scene-type cameras that carry
+        extrinsics in the base frame. Returns a cached PNG path, or raises."""
+        prefix = self._ep_prefix(task, episode)
+        calib_key = f"{prefix}/calibration_results.json"
+        if s3.try_head(calib_key, bucket=self.bucket) is None:
+            raise FileNotFoundError("no calibration for this episode")
+        calib = s3.get_json(calib_key, bucket=self.bucket)
+        cam_calib = (calib.get("cameras") or {}).get(camera)
+        if not cam_calib or not cam_calib.get("extrinsics"):
+            raise ValueError(f"camera '{camera}' has no scene extrinsics to visualize")
+
+        mp4 = self.video_path(task, episode, camera, "left")
+        obj = s3.head(f"{prefix}/cameras/{camera}.svo2", bucket=self.bucket)
+        bt = (calib.get("bimanual_transform") or {}).get("right_base_to_left_base")
+
+        def _produce(dst: Path):
+            frame = dst.with_suffix(".frame.png")
+            calib_overlay.extract_frame(mp4, frame, frame_index=0)
+            ok = calib_overlay.draw_overlay(frame, cam_calib, bt, dst)
+            frame.unlink(missing_ok=True)
+            if not ok:
+                raise ValueError("could not render calibration overlay")
+
+        return cache.get_or_create(f"{obj.etag}_{camera}_calib.png", _produce)
 
     def episode_stat(self, task, episode):
         md = s3.get_json(f"{self._ep_prefix(task, episode)}/metadata.json", bucket=self.bucket)
