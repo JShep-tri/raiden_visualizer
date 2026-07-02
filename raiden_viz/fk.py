@@ -20,6 +20,19 @@ import numpy as np
 
 _URDF = Path(__file__).resolve().parent / "urdf" / "yam.urdf"
 
+# Fixed transform from the URDF's tip link (link_6, the wrist flange) to the
+# actual grasp point ("grasp_site" in raiden's MuJoCo model). Recovered by
+# matching this URDF's FK against raiden's kinematics (i2rt Kinematics on the
+# yam_4310_linear model) across configs — verified constant. It's a 90° rotation
+# about the tool Z plus ~13.5 cm down the tool axis (the gripper length), so the
+# EE we report is the grasp point, matching how raiden resolves EE poses.
+_T_FLANGE_TO_GRASP = np.array([
+    [0.0, 1.0, 0.0, -0.00065],
+    [-1.0, 0.0, 0.0, 0.00615],
+    [0.0, 0.0, 1.0, 0.13465],
+    [0.0, 0.0, 0.0, 1.0],
+])
+
 
 def _rpy_to_R(rpy):
     r, p, y = rpy
@@ -79,12 +92,13 @@ def _chain():
 
 
 def ee_position(q) -> np.ndarray:
-    """EE (flange) xyz in the arm base frame for one joint vector q (len>=6)."""
+    """Grasp-point xyz in the arm base frame for one joint vector q (len>=6)."""
     M = np.eye(4)
     for (origin_T, axis, revolute), qi in zip(_chain(), q):
         M = M @ origin_T
         if revolute:
             M = M @ _T(_axis_angle_R(axis, float(qi)), np.zeros(3))
+    M = M @ _T_FLANGE_TO_GRASP  # flange -> grasp point (matches raiden's EE)
     return M[:3, 3]
 
 

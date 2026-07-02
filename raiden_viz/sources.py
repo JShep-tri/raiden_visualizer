@@ -51,22 +51,19 @@ def _ee_traces(npz_path, calibration) -> dict | None:
     idx = np.arange(0, n, stride)
     times = ((ts[idx] - ts[0]) / 1e9).round(3).tolist()
 
+    # Only the LEFT arm is emitted. FK is verified correct (matches raiden's own
+    # i2rt.Kinematics grasp_site to ~8mm), but the RIGHT arm — whose FK is in its
+    # own base frame and must be mapped via bimanual_transform then projected
+    # through the scene-camera extrinsic — does not land on the gripper. Raiden's
+    # own visualizer only plots the right EE in a 3D world view, never projected
+    # onto the scene image, so there's no reference for that projection. Rather
+    # than draw a wrong overlay, the right arm is gated off until validated.
+    # (In practice YAM episodes are largely single-active-arm anyway.)
     arms = []
-    right_to_left = None
-    if calibration and calibration.get("bimanual_transform"):
-        rt = calibration["bimanual_transform"].get("right_base_to_left_base")
-        if rt is not None:
-            right_to_left = np.array(rt, float)
-
-    for side, jkey in (("left", "follower_l_joint_pos"), ("right", "follower_r_joint_pos")):
+    for side, jkey in (("left", "follower_l_joint_pos"),):
         if jkey not in keys:
             continue
-        ee = fk.ee_trajectory(data[jkey][idx])  # (M,3) in that arm's base frame
-        if side == "right" and right_to_left is not None:
-            ee_h = np.c_[ee, np.ones(len(ee))]
-            ee = (right_to_left @ ee_h.T).T[:, :3]
-        elif side == "right":
-            continue  # can't place right arm without the bimanual transform
+        ee = fk.ee_trajectory(data[jkey][idx])  # (M,3) in the arm's base frame
         arms.append({"side": side, "xyz": np.round(ee, 4).tolist()})
 
     if not arms:
