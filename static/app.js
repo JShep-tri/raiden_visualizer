@@ -135,6 +135,15 @@ async function renderOverview() {
       c.appendChild(el("div", "lbl", lbl));
       stats.appendChild(c);
     });
+    // Hours-of-data card — filled in once /api/stats (with per-episode durations)
+    // loads in renderAnalytics; shows "…" until then.
+    const hcard = el("div", "ov-stat");
+    hcard.appendChild(el("div", "num", "…"));
+    hcard.querySelector(".num").id = "ov-hours-num";
+    const hlbl = el("div", "lbl", "Hours");
+    hlbl.id = "ov-hours-lbl";
+    hcard.appendChild(hlbl);
+    stats.appendChild(hcard);
     if (ov.stations.length) {
       const c = el("div", "ov-stat");
       c.appendChild(el("div", "num", "🖥"));
@@ -194,6 +203,7 @@ async function renderAnalytics(taskOrder) {
   const eps = (stats.episodes || []).filter((e) => e.duration_s != null);
   const colors = taskColors(taskOrder || []);
 
+  updateHoursCard(eps, stats);
   drawHistogram(eps);
   drawScatter(eps, colors);
 
@@ -214,6 +224,35 @@ async function renderAnalytics(taskOrder) {
     s.appendChild(el("span", null, t));
     legend.appendChild(s);
   });
+}
+
+// Sum episode durations into the "Hours" overview card. When stats were sampled
+// (huge sources), scale the sampled mean up to the true episode count and mark it
+// an estimate, rather than under-reporting.
+function updateHoursCard(eps, stats) {
+  const numEl = $("#ov-hours-num");
+  const lblEl = $("#ov-hours-lbl");
+  if (!numEl) return;
+  const durs = eps.map((e) => e.duration_s).filter((d) => d > 0);
+  if (!durs.length) {
+    numEl.textContent = "—";
+    lblEl.textContent = "Hours";
+    return;
+  }
+  const sumSecs = durs.reduce((a, b) => a + b, 0);
+  let totalSecs = sumSecs;
+  let estimated = false;
+  if (stats.sampled && stats.total_episodes) {
+    // Extrapolate: mean sampled duration × all episodes.
+    totalSecs = (sumSecs / durs.length) * stats.total_episodes;
+    estimated = true;
+  }
+  const hours = totalSecs / 3600;
+  numEl.textContent = (estimated ? "~" : "") + (hours >= 10 ? hours.toFixed(0) : hours.toFixed(1));
+  lblEl.textContent = estimated ? "Hours (est.)" : "Hours";
+  numEl.title = estimated
+    ? `Estimated from ${durs.length} sampled episodes (mean ${(sumSecs / durs.length).toFixed(1)}s) × ${stats.total_episodes.toLocaleString()} episodes`
+    : `Sum of ${durs.length} episode durations`;
 }
 
 function setupCanvas(id) {
