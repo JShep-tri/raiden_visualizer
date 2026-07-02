@@ -37,6 +37,8 @@ HOST = os.environ.get("RAIDEN_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RAIDEN_PORT", "8080"))
 
 # Cap on cache size (GB); oldest clips are evicted past this. 0 disables eviction.
-CACHE_MAX_GB = float(os.environ.get("RAIDEN_CACHE_MAX_GB", "20"))
+# Kept modest by default: the deploy host's disk is shared with other work, so
+# the cache must stay bounded well under free space.
+CACHE_MAX_GB = float(os.environ.get("RAIDEN_CACHE_MAX_GB", "8"))
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)

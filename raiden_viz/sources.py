@@ -16,6 +16,7 @@ YamMcapSource: <prefix>/<task>/episode_<uuid>/output.mcap  (one Foxglove-protobu
 """
 
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -186,36 +187,51 @@ class YamMcapSource(Source):
     def _mcap_key(self, task, episode):
         return f"{self.prefix}/{task}/{episode}/output.mcap"
 
-    def _local_mcap(self, task, episode):
-        """Fetch (and cache) the raw MCAP; returns (local_path, etag)."""
-        obj = s3.try_head(self._mcap_key(task, episode), bucket=self.bucket)
-        if obj is None:
-            raise FileNotFoundError(f"no output.mcap for {task}/{episode}")
-        path = cache.get_or_create(
-            f"yam_{obj.etag}.mcap",
-            lambda dst: s3.download(obj.key, dst, bucket=self.bucket),
-        )
-        return path, obj.etag
+    def _mine(self, obj) -> dict:
+        """Download the raw MCAP to a TEMP file, extract everything (all camera
+        MP4s + robot/instruction JSON), cache those small artifacts keyed by ETag,
+        then delete the big MCAP. Idempotent: skips work already cached.
 
-    def _extracted(self, task, episode) -> dict:
-        """Return cached extraction (instruction + robot + camera list), decoding
-        the MCAP once if needed. Cached as a small JSON keyed by ETag."""
-        obj = s3.try_head(self._mcap_key(task, episode), bucket=self.bucket)
-        if obj is None:
-            raise FileNotFoundError(f"no output.mcap for {task}/{episode}")
+        The raw MCAP is 200-880 MB and must never linger in the cache, so it's a
+        temp file (not a cache.get_or_create artifact) that's removed in finally."""
         meta_json = cache.path_for(f"yam_{obj.etag}_meta.json")
         if meta_json.exists():
-            return json.loads(meta_json.read_text())
+            ex = json.loads(meta_json.read_text())
+            # Ensure the per-camera MP4s exist too (a partial prior run may have
+            # written meta but not videos).
+            if all(cache.path_for(f"yam_{obj.etag}_{c}.mp4").exists() for c in ex["cameras"]):
+                return ex
 
-        mcap_path, _ = self._local_mcap(task, episode)
-        probe = yam.probe(mcap_path)
-        mr = yam.extract_meta_and_robot(mcap_path)
-        result = {"etag": obj.etag, "cameras": probe["cameras"], **mr}
-        meta_json.write_text(json.dumps(result))
-        return result
+        # Make room for the big MCAP + its extracted MP4s before downloading, so
+        # a near-full cache can't wedge mid-download.
+        cache.evict(headroom_gb=min(2.0, obj.size / 1024**3 * 1.5))
+        tmp = cache.path_for(f"yam_{obj.etag}.mcap.tmp{os.getpid()}")
+        try:
+            s3.download(obj.key, tmp, bucket=self.bucket)
+            probe = yam.probe(tmp)
+            # Extract every camera to a cached MP4 in this single pass.
+            for cam in probe["cameras"]:
+                mp4 = cache.path_for(f"yam_{obj.etag}_{cam}.mp4")
+                if not mp4.exists():
+                    cache.get_or_create(
+                        f"yam_{obj.etag}_{cam}.mp4",
+                        lambda dst, _c=cam: yam.extract_camera_mp4(tmp, _c, dst),
+                    )
+            mr = yam.extract_meta_and_robot(tmp)
+            ex = {"etag": obj.etag, "cameras": probe["cameras"], **mr}
+            meta_json.write_text(json.dumps(ex))
+            return ex
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def _head(self, task, episode):
+        obj = s3.try_head(self._mcap_key(task, episode), bucket=self.bucket)
+        if obj is None:
+            raise FileNotFoundError(f"no output.mcap for {task}/{episode}")
+        return obj
 
     def episode_detail(self, task, episode):
-        ex = self._extracted(task, episode)
+        ex = self._mine(self._head(task, episode))
         cameras = [{"name": c, "has_video": True, "eyes": ["left"]} for c in ex["cameras"]]
         return {
             "source": self.id, "task": task, "episode": episode,
@@ -227,16 +243,15 @@ class YamMcapSource(Source):
         }
 
     def video_path(self, task, episode, camera, eye):
-        obj = s3.try_head(self._mcap_key(task, episode), bucket=self.bucket)
-        if obj is None:
-            raise FileNotFoundError(f"no output.mcap for {task}/{episode}")
-        mp4_name = f"yam_{obj.etag}_{camera}.mp4"
-        if cache.path_for(mp4_name).exists():
-            return cache.path_for(mp4_name)
-        mcap_path, _ = self._local_mcap(task, episode)
-        return cache.get_or_create(
-            mp4_name, lambda dst: yam.extract_camera_mp4(mcap_path, camera, dst)
-        )
+        obj = self._head(task, episode)
+        mp4 = cache.path_for(f"yam_{obj.etag}_{camera}.mp4")
+        if not mp4.exists():
+            # Mining extracts all cameras at once (single MCAP download), then
+            # drops the MCAP — so this only downloads on a true cold miss.
+            self._mine(obj)
+        if not mp4.exists():
+            raise FileNotFoundError(f"camera {camera!r} not found in {task}/{episode}")
+        return mp4
 
     def episode_stat(self, task, episode):
         # Analytics must not trigger 200-880 MB downloads per episode. The episode

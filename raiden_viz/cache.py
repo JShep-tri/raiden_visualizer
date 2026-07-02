@@ -52,16 +52,19 @@ def get_or_create(cache_name: str, produce) -> Path:
     return dest
 
 
-def _maybe_evict() -> None:
+def evict(headroom_gb: float = 0.0) -> None:
+    """Evict oldest cached files until usage is under (cap - headroom).
+
+    Pass headroom_gb before a large download so there's room for it. In-flight
+    ``.tmp`` files are ignored (not counted, not evicted)."""
     if config.CACHE_MAX_GB <= 0:
         return
-    files = [p for p in config.CACHE_DIR.glob("*") if p.is_file()]
+    files = [p for p in config.CACHE_DIR.glob("*") if p.is_file() and ".tmp" not in p.name]
     total = sum(p.stat().st_size for p in files)
-    limit = config.CACHE_MAX_GB * (1024**3)
+    limit = max(0, (config.CACHE_MAX_GB - headroom_gb)) * (1024**3)
     if total <= limit:
         return
-    # Evict oldest-accessed first.
-    for p in sorted(files, key=lambda x: x.stat().st_mtime):
+    for p in sorted(files, key=lambda x: x.stat().st_mtime):  # oldest first
         try:
             total -= p.stat().st_size
             p.unlink()
@@ -69,3 +72,7 @@ def _maybe_evict() -> None:
             continue
         if total <= limit:
             break
+
+
+def _maybe_evict() -> None:
+    evict()
