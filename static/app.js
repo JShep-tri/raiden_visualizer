@@ -23,6 +23,7 @@ const state = {
   plots: [],        // { cursor, ctx, W, H } overlay canvases to animate
   playing: false,
   raf: null,
+  eeTraceOn: true,   // show the end-effector future-trace overlay
 };
 
 async function api(path) {
@@ -78,6 +79,11 @@ async function init() {
   $("#brand-home").addEventListener("click", showOverview);
   $("#play-btn").addEventListener("click", togglePlay);
   $("#scrubber").addEventListener("input", onScrub);
+  $("#trace-toggle").addEventListener("click", (ev) => {
+    state.eeTraceOn = !state.eeTraceOn;
+    ev.target.classList.toggle("active", state.eeTraceOn);
+    drawAllTraces(currentTime());  // redraw (or clear) immediately
+  });
 }
 
 /* ---------------- Source + overview ---------------- */
@@ -509,6 +515,11 @@ function renderDetail(d) {
   const hasStereo = (d.cameras || []).some((c) => (c.eyes || []).length > 1);
   $("#eye-toggle").classList.toggle("hidden", !hasStereo);
 
+  // EE-trace toggle only when the source provides projectable traces.
+  const hasTraces = !!(d.ee_traces && d.ee_traces.cameras &&
+                       Object.keys(d.ee_traces.cameras).length && d.ee_traces.arms.length);
+  $("#trace-toggle").classList.toggle("hidden", !hasTraces);
+
   buildCameraGrid(d.cameras || []);
   renderMeta(md, d);
   renderPlots(d.robot);
@@ -577,6 +588,9 @@ function makeVideoTile(c) {
   overlay.appendChild(el("div", "cam-sub", "first load transcodes .svo2 → mp4"));
 
   tile.appendChild(video);
+  // EE-trace overlay canvas (only meaningful for cameras with projection params).
+  const traceCanvas = el("canvas", "cam-trace");
+  tile.appendChild(traceCanvas);
   tile.appendChild(label);
   tile.appendChild(overlay);
 
@@ -584,7 +598,10 @@ function makeVideoTile(c) {
     `${apiBase()}/tasks/${encodeURIComponent(state.task)}/episodes/${encodeURIComponent(state.episode)}` +
     `/video?camera=${encodeURIComponent(c.name)}&eye=${state.eye}`;
 
-  const tileState = { camera: c.name, video, ready: false };
+  // Projection params for this camera, if the source provided EE traces.
+  const proj = (state.detail && state.detail.ee_traces && state.detail.ee_traces.cameras)
+    ? state.detail.ee_traces.cameras[c.name] : null;
+  const tileState = { camera: c.name, video, ready: false, canvas: traceCanvas, proj };
   const onReady = () => {
     if (tileState.ready) return;
     tileState.ready = true;
@@ -599,6 +616,7 @@ function makeVideoTile(c) {
     }
     if (!state.master) state.master = video;
     updateDurationUI();
+    drawTrace(tileState, currentTime());  // show the trace from the current position
   };
   video.onloadedmetadata = onReady;
   video.oncanplay = onReady;
@@ -668,6 +686,7 @@ function onScrub(ev) {
   seekAll(secs);
   updateTransportUI(secs);
   drawAllCursors(secs);
+  drawAllTraces(secs);
   if (wasPlaying) startPlayback();
 }
 
@@ -678,6 +697,7 @@ function tick() {
   const t = currentTime();
   updateTransportUI(t);
   drawAllCursors(t);
+  drawAllTraces(t);
   // Master clip ended -> stop and pin at the end.
   if (state.master && dur && state.master.ended) {
     stopPlayback();
@@ -690,6 +710,82 @@ function tick() {
 
 function updateDurationUI() {
   updateTransportUI(currentTime());
+}
+
+/* ---------------- EE future-trace overlay on camera tiles ---------------- */
+
+const EE_TRACE_STEPS = 8;      // how many future waypoints to draw
+const EE_TRACE_HORIZON_S = 1.5;  // over what future time window
+
+// Project a base-frame point (x,y,z) to pixel coords for a camera's params.
+// Convention: X_cam = R^T (X_base - t); uv = K X_cam (verified against real frames).
+function projectPoint(p, proj, W, H) {
+  const R = proj.R, t = proj.t, K = proj.K;
+  const d = [p[0] - t[0], p[1] - t[1], p[2] - t[2]];
+  // camera coords = R^T d  (R rows dotted with d)
+  const cx = R[0][0]*d[0] + R[1][0]*d[1] + R[2][0]*d[2];
+  const cy = R[0][1]*d[0] + R[1][1]*d[1] + R[2][1]*d[2];
+  const cz = R[0][2]*d[0] + R[1][2]*d[1] + R[2][2]*d[2];
+  if (cz <= 0) return null;  // behind camera
+  // scale K to the actual canvas size (image_size is the calibrated size)
+  const [iw, ih] = proj.image_size || [W, H];
+  const sx = W / iw, sy = H / ih;
+  const u = (K[0][0]*cx/cz + K[0][2]) * sx;
+  const v = (K[1][1]*cy/cz + K[1][2]) * sy;
+  return [u, v];
+}
+
+// dark(now) -> bright(future) gradient, hue blue->cyan->green. Returns CSS rgb.
+function traceColor(f) {
+  const hue = 210 - 150 * f;         // 210(blue) -> 60(yellow-green)
+  const light = 40 + 45 * f;          // dark -> bright
+  return `hsl(${hue}, 90%, ${light}%)`;
+}
+
+function drawTrace(tileState, secs) {
+  const { canvas, video, proj } = tileState;
+  const ee = state.detail && state.detail.ee_traces;
+  const cv = canvas.getContext("2d");
+  // size canvas to displayed video box
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  cv.clearRect(0, 0, W, H);
+  if (!proj || !ee || !state.eeTraceOn) return;
+
+  const times = ee.time;
+  if (!times || !times.length) return;
+  // current index by playback time
+  const dur = ee.duration_s || timelineDuration();
+  let i0 = Math.round((secs / dur) * (times.length - 1));
+  i0 = Math.max(0, Math.min(times.length - 1, i0));
+  const span = Math.max(1, Math.round((EE_TRACE_HORIZON_S / dur) * (times.length - 1)));
+  const step = Math.max(1, Math.round(span / EE_TRACE_STEPS));
+
+  ee.arms.forEach((arm) => {
+    const pts = [];
+    for (let k = 0; k < EE_TRACE_STEPS; k++) {
+      const i = Math.min(times.length - 1, i0 + k * step);
+      const uv = projectPoint(arm.xyz[i], proj, W, H);
+      if (uv) pts.push(uv);
+    }
+    if (pts.length < 1) return;
+    // connecting line
+    for (let k = 0; k < pts.length - 1; k++) {
+      cv.strokeStyle = traceColor(k / (EE_TRACE_STEPS - 1));
+      cv.lineWidth = 2.5;
+      cv.beginPath(); cv.moveTo(pts[k][0], pts[k][1]); cv.lineTo(pts[k+1][0], pts[k+1][1]); cv.stroke();
+    }
+    // waypoint dots
+    pts.forEach((p, k) => {
+      cv.fillStyle = traceColor(k / (EE_TRACE_STEPS - 1));
+      cv.beginPath(); cv.arc(p[0], p[1], k === 0 ? 5 : 3.5, 0, Math.PI * 2); cv.fill();
+      cv.lineWidth = 1; cv.strokeStyle = "rgba(0,0,0,0.5)"; cv.stroke();
+    });
+  });
+}
+
+function drawAllTraces(secs) {
+  state.tiles.forEach((t) => { if (t.ready && t.proj) drawTrace(t, secs); });
 }
 
 function updateTransportUI(secs) {

@@ -17,6 +17,9 @@ dependencies = [
 [tool.setuptools]
 packages = ["raiden_viz"]
 
+[tool.setuptools.package-data]
+raiden_viz = ["urdf/*.urdf"]
+
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"

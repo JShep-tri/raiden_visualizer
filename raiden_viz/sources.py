@@ -21,7 +21,74 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import cache, calib_overlay, robot_data, s3, svo, yam
+from . import cache, calib_overlay, fk, robot_data, s3, svo, yam
+
+
+def _ee_traces(npz_path, calibration) -> dict | None:
+    """End-effector trajectories (via FK) + per-scene-camera projection params, so
+    the frontend can draw a future-EE trace on the video, synced to playback.
+
+    EE points are computed in the ``left_arm_base`` frame (the calibration frame):
+    the left arm's FK is already there; the right arm's FK is mapped through
+    ``bimanual_transform.right_base_to_left_base``. Sampled at ~video rate to keep
+    the payload small; the frontend indexes by playback time.
+    """
+    import numpy as np
+
+    data = np.load(npz_path, allow_pickle=True)
+    keys = set(data.files)
+    if "timestamps" not in keys:
+        return None
+    ts = data["timestamps"].astype(np.float64)
+    dur = (ts[-1] - ts[0]) / 1e9
+    if dur <= 0:
+        return None
+    n = len(ts)
+
+    # Sample ~30 Hz (video rate) rather than the ~98 Hz robot rate.
+    target_hz = 30.0
+    stride = max(1, int(round(n / dur / target_hz)))
+    idx = np.arange(0, n, stride)
+    times = ((ts[idx] - ts[0]) / 1e9).round(3).tolist()
+
+    arms = []
+    right_to_left = None
+    if calibration and calibration.get("bimanual_transform"):
+        rt = calibration["bimanual_transform"].get("right_base_to_left_base")
+        if rt is not None:
+            right_to_left = np.array(rt, float)
+
+    for side, jkey in (("left", "follower_l_joint_pos"), ("right", "follower_r_joint_pos")):
+        if jkey not in keys:
+            continue
+        ee = fk.ee_trajectory(data[jkey][idx])  # (M,3) in that arm's base frame
+        if side == "right" and right_to_left is not None:
+            ee_h = np.c_[ee, np.ones(len(ee))]
+            ee = (right_to_left @ ee_h.T).T[:, :3]
+        elif side == "right":
+            continue  # can't place right arm without the bimanual transform
+        arms.append({"side": side, "xyz": np.round(ee, 4).tolist()})
+
+    if not arms:
+        return None
+
+    # Per-scene-camera projection: scaled K + extrinsic (R,t). Frontend applies
+    # X_cam = R^T (X_base - t); uv = K X_cam. K is scaled to the decoded frame
+    # size (left eye = full width here, so image_size already matches).
+    cams = {}
+    for cname, c in (calibration.get("cameras") or {}).items() if calibration else []:
+        ext = c.get("extrinsics")
+        intr = c.get("intrinsics", {})
+        if not ext or "camera_matrix" not in intr:
+            continue
+        cams[cname] = {
+            "K": intr["camera_matrix"],
+            "R": ext["rotation_matrix"],
+            "t": ext["translation_vector"],
+            "image_size": intr.get("image_size"),
+        }
+
+    return {"time": times, "duration_s": round(dur, 3), "arms": arms, "cameras": cams}
 
 
 class Source:
@@ -137,6 +204,7 @@ class RaidenSource(Source):
         cameras.sort(key=lambda c: c["name"])
 
         robot = None
+        ee_traces = None
         robot_obj = s3.try_head(f"{prefix}/robot_data.npz", bucket=self.bucket)
         if robot_obj:
             npz = cache.get_or_create(
@@ -144,6 +212,7 @@ class RaidenSource(Source):
                 lambda dst: s3.download(robot_obj.key, dst, bucket=self.bucket),
             )
             robot = robot_data.summarize(npz)
+            ee_traces = _ee_traces(npz, calibration)
 
         return {
             "source": self.id, "task": task, "episode": episode,
@@ -151,6 +220,7 @@ class RaidenSource(Source):
             "status": metadata.get("status"),
             "metadata": metadata, "calibration": calibration,
             "cameras": cameras, "robot": robot, "annotations": [],
+            "ee_traces": ee_traces,
         }
 
     def video_path(self, task, episode, camera, eye):
