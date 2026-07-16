@@ -1,19 +1,22 @@
-"""Decode YAM (xdof) episode MCAPs into the viewer's common shapes.
+"""Decode YAM-family episode MCAPs into the viewer's common shapes.
 
-Each YAM episode is a single ``output.mcap`` (200-880 MB) using Foxglove
-protobuf schemas:
+Each episode is a single MCAP (200-900 MB) using Foxglove protobuf schemas. Two
+topic conventions are supported (both are YAM two-arm stations):
 
-  * ``/<cam>/image-raw``   foxglove.CompressedVideo  (format="h264", field 3 = bytes)
-  * ``/<arm>-proprio``     RobotState   {position[6], velocity[6], torque[6]}
-  * ``/<eef>-proprio``     GripperState {position, velocity, torque}
-  * ``/instruction``       Instructions {data}
-  * ``/subtask-annotation``Annotation   {data, timestamp}
+  original ("yam_raw"/russet)          ABC-130k
+  ------------------------------------ -----------------------------------
+  /<cam>/image-raw  CompressedVideo    /<cam>            CompressedVideo
+  /<arm>-proprio    RobotState         /<arm>-state      RobotState
+  /<eef>-proprio    GripperState       /<ee>-state       GripperState
+  /instruction      Instructions       /instruction      Instructions
+  /subtask-annotation  Annotation      (none)
 
-The MCAP is downloaded once; we extract every camera to MP4 and the robot
-trajectories to a compact JSON, cache those small artifacts (keyed by the S3
-ETag), and delete the big MCAP. This mirrors the raiden decode pipeline —
-concatenate H.264 payloads -> ffmpeg -> MP4 — but reads frames from the Foxglove
-protobuf ``data`` field instead of the ZED header layout, and needs no stereo crop.
+Video is H.264 or H.265 (read from the CompressedVideo ``format`` field). The
+MCAP is downloaded once; we extract every camera to MP4 and the robot
+trajectories to a compact JSON, cache those small artifacts, and delete the big
+MCAP. Frames come from the Foxglove protobuf ``data`` field (field 3); we
+concatenate them and hand the elementary stream to ffmpeg (stream-copy), no
+stereo crop.
 """
 
 import json
@@ -23,13 +26,30 @@ from pathlib import Path
 import numpy as np
 from mcap.reader import make_reader
 
-VIDEO_SUFFIX = "/image-raw"
-PROPRIO_SUFFIX = "-proprio"  # exclude "-leader" (teleop command) channels by default
+# A camera topic is one whose schema is foxglove.CompressedVideo. Rather than
+# match on name suffixes (which differ across conventions), we detect cameras by
+# schema and derive a clean name from the topic.
+_CAMERA_SCHEMA = "foxglove.CompressedVideo"
+
+
+def is_camera_topic(topic: str, schema_name: str | None) -> bool:
+    return schema_name == _CAMERA_SCHEMA
 
 
 def camera_name(topic: str) -> str:
-    """/top-left-camera/image-raw -> top_left_camera"""
-    return topic[1:-len(VIDEO_SUFFIX)].replace("-", "_").replace("/", "_")
+    """/top-left-camera/image-raw -> top_left_camera ; /top-left-camera -> top_left_camera"""
+    t = topic.strip("/")
+    if t.endswith("/image-raw"):
+        t = t[: -len("/image-raw")]
+    return t.replace("-", "_").replace("/", "_")
+
+
+def is_proprio_topic(topic: str) -> bool:
+    """Actual robot state, both conventions: '<arm>-proprio' or '<x>-state'.
+    Excludes '-leader' (teleop command) and '-action' (commanded) channels."""
+    if topic.endswith("-leader") or topic.endswith("-action"):
+        return False
+    return topic.endswith("-proprio") or topic.endswith("-state")
 
 
 def _read_varint(b: bytes, o: int) -> tuple[int, int]:
@@ -41,12 +61,12 @@ def _read_varint(b: bytes, o: int) -> tuple[int, int]:
         s += 7
 
 
-def _cv_h264_payload(buf: bytes) -> bytes:
-    """Pull field 3 (data bytes) out of a foxglove.CompressedVideo message.
-
-    We parse just enough protobuf wire format to grab field 3 without building
-    the full message — the video ``data`` is by far the largest field."""
+def _cv_fields(buf: bytes) -> tuple[bytes, str | None]:
+    """Pull (data bytes=field 3, format string=field 4) from a
+    foxglove.CompressedVideo message. Parses just enough protobuf wire format."""
     o = 0
+    data = b""
+    fmt = None
     while o < len(buf):
         tag, o = _read_varint(buf, o)
         fn, wt = tag >> 3, tag & 7
@@ -54,7 +74,9 @@ def _cv_h264_payload(buf: bytes) -> bytes:
             ln, o = _read_varint(buf, o)
             val = buf[o:o + ln]; o += ln
             if fn == 3:
-                return val
+                data = val
+            elif fn == 4:
+                fmt = val.decode("utf8", "replace")
         elif wt == 0:
             _, o = _read_varint(buf, o)
         elif wt == 5:
@@ -63,18 +85,24 @@ def _cv_h264_payload(buf: bytes) -> bytes:
             o += 8
         else:
             break
-    return b""
+    return data, fmt
+
+
+def _cv_h264_payload(buf: bytes) -> bytes:
+    return _cv_fields(buf)[0]
 
 
 def probe(mcap_path: Path) -> dict:
-    """List channels + message counts without decoding payloads."""
+    """List channels + message counts without decoding payloads. Cameras are
+    detected by their foxglove.CompressedVideo schema (topic naming varies)."""
     with open(mcap_path, "rb") as f:
         summary = make_reader(f).get_summary()
         cams, topics = [], {}
         counts = summary.statistics.channel_message_counts if summary.statistics else {}
         for cid, ch in summary.channels.items():
             topics[ch.topic] = counts.get(cid, 0)
-            if ch.topic.endswith(VIDEO_SUFFIX):
+            sch = summary.schemas.get(ch.schema_id)
+            if is_camera_topic(ch.topic, sch.name if sch else None):
                 cams.append(camera_name(ch.topic))
     return {"cameras": sorted(cams), "topics": topics}
 
@@ -120,47 +148,58 @@ def stats_from_tail(tail: bytes, total_size: int) -> dict:
     return {"duration_s": dur}
 
 
+# Map the CompressedVideo `format` string to ffmpeg's raw-elementary demuxer.
+_FMT_TO_FFMPEG = {"h264": "h264", "h265": "hevc", "hevc": "hevc"}
+
+
 def extract_camera_mp4(mcap_path: Path, camera: str, out_mp4: Path, fps: int = 30) -> dict:
-    """Concatenate one camera's H.264 frames and mux to MP4."""
-    topic = "/" + camera.replace("_camera", "-camera").replace("_", "-") + VIDEO_SUFFIX
-    # camera_name() is lossy (- and / both -> _); match by re-deriving from topics.
+    """Concatenate one camera's compressed frames and mux to MP4."""
+    # Match the camera topic by its CompressedVideo schema + derived name.
     with open(mcap_path, "rb") as f:
-        reader = make_reader(f)
+        summary = make_reader(f).get_summary()
         match = None
-        for _sid, ch in reader.get_summary().channels.items():
-            if ch.topic.endswith(VIDEO_SUFFIX) and camera_name(ch.topic) == camera:
+        for _sid, ch in summary.channels.items():
+            sch = summary.schemas.get(ch.schema_id)
+            if is_camera_topic(ch.topic, sch.name if sch else None) and camera_name(ch.topic) == camera:
                 match = ch.topic
                 break
     if match is None:
         raise ValueError(f"camera {camera!r} not found in {mcap_path.name}")
 
-    h264 = out_mp4.with_suffix(".h264")
+    raw = out_mp4.with_suffix(".bitstream")
     n = 0
-    with open(mcap_path, "rb") as f, open(h264, "wb") as out:
+    codec = None
+    with open(mcap_path, "rb") as f, open(raw, "wb") as out:
         for _schema, channel, message in make_reader(f).iter_messages(topics=[match]):
-            payload = _cv_h264_payload(message.data)
+            payload, fmt = _cv_fields(message.data)
             if payload:
+                if codec is None and fmt:
+                    codec = fmt.lower()
                 out.write(payload)
                 n += 1
     if n == 0:
-        h264.unlink(missing_ok=True)
+        raw.unlink(missing_ok=True)
         raise ValueError(f"no frames for camera {camera!r}")
 
-    # The frames are already H.264, so stream-copy them straight into an MP4
-    # container (-c:v copy) rather than re-encoding — ~20x faster (0.2s vs ~5s
-    # per camera) with zero quality loss. The MP4 is larger than a re-encode but
-    # streams fine on the internal network.
+    demuxer = _FMT_TO_FFMPEG.get(codec or "h264", "h264")
+    # H.264 is universally playable in browsers, so stream-copy it (fast, lossless).
+    # H.265/HEVC is NOT reliably decodable in Chrome/Firefox, so transcode it to
+    # H.264 — slower, but otherwise the <video> tag shows "cannot decode".
+    if demuxer == "h264":
+        vcodec = ["-c:v", "copy"]
+    else:
+        vcodec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"]
     subprocess.run(
         [
             "ffmpeg", "-y", "-loglevel", "error",
-            "-f", "h264", "-r", str(fps), "-i", str(h264),
-            "-c:v", "copy", "-movflags", "+faststart",
+            "-f", demuxer, "-r", str(fps), "-i", str(raw),
+            *vcodec, "-movflags", "+faststart",
             "-f", "mp4", str(out_mp4),
         ],
         check=True, capture_output=True,
     )
-    h264.unlink(missing_ok=True)
-    return {"frames": n}
+    raw.unlink(missing_ok=True)
+    return {"frames": n, "codec": codec}
 
 
 def _pb_pool(reader):
@@ -200,7 +239,7 @@ def extract_meta_and_robot(mcap_path: Path, max_points: int = 600) -> dict:
         for _sid, ch in summary.channels.items():
             sch = summary.schemas.get(ch.schema_id)
             schema_by_topic[ch.topic] = sch.name if sch else None
-            if ch.topic.endswith(PROPRIO_SUFFIX):
+            if is_proprio_topic(ch.topic):
                 proprio_topics.append(ch.topic)
 
         # Collect raw per-topic samples.

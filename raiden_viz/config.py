@@ -13,14 +13,20 @@ AWS_REGION = os.environ.get("RAIDEN_AWS_REGION", "us-west-2")
 # Datasets the viewer can browse. Each has a distinct on-disk format handled by a
 # dedicated source adapter (see sources.py). "kind" selects the adapter.
 #   raiden: <prefix>/<task>/<episode>/{metadata.json, cameras/*.svo2, robot_data.npz}
-#   yam:    <prefix>/<task>/episode_<uuid>/output.mcap  (one Foxglove-protobuf MCAP)
+#   yam:    <prefix>/<task>/episode_<uuid>/<mcap_name>  (one Foxglove-protobuf MCAP)
 SOURCES = [
     {"id": "raiden", "label": "Raiden", "kind": "raiden", "bucket": S3_BUCKET, "prefix": S3_PREFIX},
-    {"id": "yam", "label": "YAM (xdof)", "kind": "yam", "bucket": S3_BUCKET, "prefix": "yam_raw/2026_03_30_zed"},
+    {"id": "yam", "label": "YAM (xdof)", "kind": "yam", "bucket": S3_BUCKET,
+     "prefix": "yam_raw/2026_03_30_zed", "mcap_name": "output.mcap"},
     # YAM teleop recorded on the russet station, uploaded from ~/data/raw. Same
     # raiden .svo2 layout (metadata.json + cameras/*.svo2 + robot_data.npz), so it
     # uses the raiden adapter.
     {"id": "yam_russet", "label": "YAM (russet)", "kind": "raiden", "bucket": S3_BUCKET, "prefix": "yam_datasets/raw"},
+    # ABC-130k: the full open-source YAM dataset (xdof/Amazon). Same Foxglove-MCAP
+    # format as the yam source but with episode.mcap files, newer topic names
+    # (/<cam>, -state) and H.265 video — all handled by the yam adapter/decoder.
+    {"id": "abc130k", "label": "ABC-130k", "kind": "yam", "bucket": S3_BUCKET,
+     "prefix": "vla_foundry_datasets_test/raw_datasets_bot/abc-130k/data/train", "mcap_name": "episode.mcap"},
 ]
 
 # Local cache for downloaded .svo2 files and transcoded .mp4 clips. Decoding is

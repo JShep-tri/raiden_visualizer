@@ -94,6 +94,7 @@ class Source:
         self.label = spec["label"]
         self.bucket = spec["bucket"]
         self.prefix = spec["prefix"].strip("/")
+        self.spec = spec
 
     # ---- browsing (shared) ----
     def list_tasks(self) -> list[str]:
@@ -275,11 +276,15 @@ class RaidenSource(Source):
 
 
 class YamMcapSource(Source):
-    """One output.mcap per episode. Download the big MCAP once, extract all small
-    artifacts (per-camera mp4 + robot/instruction json), cache them, drop the MCAP."""
+    """One MCAP per episode. Download the big MCAP once, extract all small
+    artifacts (per-camera mp4 + robot/instruction json), cache them, drop the MCAP.
+
+    The per-episode MCAP basename varies by dataset (``output.mcap`` for the
+    russet/yam_raw layout, ``episode.mcap`` for ABC-130k), set via spec['mcap_name']."""
 
     def _mcap_key(self, task, episode):
-        return f"{self.prefix}/{task}/{episode}/output.mcap"
+        name = self.spec.get("mcap_name", "output.mcap")
+        return f"{self.prefix}/{task}/{episode}/{name}"
 
     def _mine(self, obj) -> dict:
         """Download the raw MCAP to a TEMP file, extract everything (all camera
