@@ -286,13 +286,16 @@ class YamMcapSource(Source):
         name = self.spec.get("mcap_name", "output.mcap")
         return f"{self.prefix}/{task}/{episode}/{name}"
 
-    def _mine(self, obj) -> dict:
+    def _mine(self, obj, task=None, episode=None) -> dict:
         """Download the raw MCAP to a TEMP file, extract everything (all camera
         MP4s + robot/instruction JSON), cache those small artifacts keyed by ETag,
         then delete the big MCAP. Idempotent: skips work already cached.
 
         The raw MCAP is 200-880 MB and must never linger in the cache, so it's a
-        temp file (not a cache.get_or_create artifact) that's removed in finally."""
+        temp file (not a cache.get_or_create artifact) that's removed in finally.
+
+        Subtask annotations may live in a sibling ``annotation.mcap`` (ABC-130k,
+        annotated episodes only); when present it's merged into ``annotations``."""
         meta_json = cache.path_for(f"yam_{obj.etag}_meta.json")
         if meta_json.exists():
             ex = json.loads(meta_json.read_text())
@@ -317,11 +320,28 @@ class YamMcapSource(Source):
                         lambda dst, _c=cam: yam.extract_camera_mp4(tmp, _c, dst),
                     )
             mr = yam.extract_meta_and_robot(tmp)
+            # If a sibling annotation.mcap exists and the episode.mcap had no inline
+            # subtask labels, pull them from there (relative to the episode start).
+            if not mr.get("annotations") and task is not None:
+                sib = self._annotation_key(task, episode)
+                sib_obj = s3.try_head(sib, bucket=self.bucket)
+                if sib_obj is not None:
+                    atmp = cache.path_for(f"yam_{obj.etag}_ann.mcap.tmp{os.getpid()}")
+                    try:
+                        s3.download(sib, atmp, bucket=self.bucket)
+                        mr["annotations"] = yam.read_annotation_mcap(atmp, mr.get("start_abs", 0.0))
+                    finally:
+                        atmp.unlink(missing_ok=True)
             ex = {"etag": obj.etag, "cameras": probe["cameras"], **mr}
             meta_json.write_text(json.dumps(ex))
             return ex
         finally:
             tmp.unlink(missing_ok=True)
+
+    def _annotation_key(self, task, episode):
+        """Sibling annotation.mcap path next to the episode's MCAP."""
+        ep_key = self._mcap_key(task, episode)
+        return ep_key.rsplit("/", 1)[0] + "/annotation.mcap"
 
     def _head(self, task, episode):
         obj = s3.try_head(self._mcap_key(task, episode), bucket=self.bucket)
@@ -330,7 +350,7 @@ class YamMcapSource(Source):
         return obj
 
     def episode_detail(self, task, episode):
-        ex = self._mine(self._head(task, episode))
+        ex = self._mine(self._head(task, episode), task, episode)
         cameras = [{"name": c, "has_video": True, "eyes": ["left"]} for c in ex["cameras"]]
         return {
             "source": self.id, "task": task, "episode": episode,
@@ -347,7 +367,7 @@ class YamMcapSource(Source):
         if not mp4.exists():
             # Mining extracts all cameras at once (single MCAP download), then
             # drops the MCAP — so this only downloads on a true cold miss.
-            self._mine(obj)
+            self._mine(obj, task, episode)
         if not mp4.exists():
             raise FileNotFoundError(f"camera {camera!r} not found in {task}/{episode}")
         return mp4

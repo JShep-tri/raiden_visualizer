@@ -257,12 +257,16 @@ def extract_meta_and_robot(mcap_path: Path, max_points: int = 600) -> dict:
             if channel.topic == "/subtask-annotation":
                 ts = getattr(m, "timestamp", None)
                 secs = (ts.seconds + ts.nanos / 1e9) if ts is not None else None
-                annotations.append({"t": secs, "text": getattr(m, "data", "")})
+                annotations.append({"t_abs": secs, "text": getattr(m, "data", "")})
                 continue
             # proprio: RobotState has repeated position/velocity/torque; GripperState scalar
             series[channel.topic].append(_as_list(m, "position"))
             ts = getattr(m, "timestamp", None)
             times[channel.topic].append((ts.seconds + ts.nanos / 1e9) if ts is not None else 0.0)
+
+    # Episode start = earliest proprio timestamp (absolute epoch seconds). Used to
+    # convert absolute annotation timestamps into seconds-from-start.
+    start_abs = min((times[t][0] for t in series if times[t]), default=0.0)
 
     # Assemble into signals keyed by a friendly name; subsample for plotting.
     signals: dict[str, dict] = {}
@@ -301,10 +305,38 @@ def extract_meta_and_robot(mcap_path: Path, max_points: int = 600) -> dict:
 
     return {
         "instruction": instruction,
-        "annotations": annotations,
+        "annotations": _rel_annotations(annotations, start_abs),
+        "start_abs": start_abs,  # absolute epoch seconds of episode start
         "robot": {"keys": list(signals), "signals": signals,
                   "time": time_axis, "summary": summary_stats},
     }
+
+
+def _rel_annotations(annotations: list, start_abs: float) -> list:
+    """Convert absolute annotation timestamps to seconds-from-episode-start,
+    sorted. Drops entries with no timestamp."""
+    out = []
+    for a in annotations:
+        ta = a.get("t_abs")
+        out.append({"t": round(ta - start_abs, 3) if ta is not None else None,
+                    "text": a.get("text", "")})
+    out.sort(key=lambda a: (a["t"] is None, a["t"] or 0.0))
+    return out
+
+
+def read_annotation_mcap(mcap_path: Path, start_abs: float) -> list:
+    """Read /subtask-annotation from a standalone annotation.mcap, returned as
+    seconds-from-start using the episode's absolute start time."""
+    with open(mcap_path, "rb") as f:
+        get_msg = _pb_pool(make_reader(f))
+    anns = []
+    with open(mcap_path, "rb") as f:
+        for schema, channel, message in make_reader(f).iter_messages(topics=["/subtask-annotation"]):
+            m = get_msg(schema.name).FromString(message.data)
+            ts = getattr(m, "timestamp", None)
+            secs = (ts.seconds + ts.nanos / 1e9) if ts is not None else None
+            anns.append({"t_abs": secs, "text": getattr(m, "data", "")})
+    return _rel_annotations(anns, start_abs)
 
 
 def _as_list(msg, field: str) -> list[float]:
