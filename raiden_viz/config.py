@@ -31,7 +31,7 @@ SOURCES = [
     # /subtask-annotation labels (which the tri-ml mirror lacks). Readable only via
     # the manip-cluster SSO profile (see BUCKET_PROFILES).
     {"id": "xdof_zed", "label": "YAM (xdof zed)", "kind": "yam", "bucket": "xdof-yam-data",
-     "prefix": "2026_03_30_zed", "mcap_name": "output.mcap"},
+     "prefix": "2026_03_30_zed", "mcap_name": "output.mcap", "requires_access": True},
 ]
 
 # Buckets that require a specific AWS profile (SSO) rather than the default

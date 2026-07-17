@@ -401,10 +401,27 @@ _KINDS = {"raiden": RaidenSource, "yam": YamMcapSource}
 _SOURCES: dict[str, Source] = {}
 
 
+def _accessible(src: Source) -> bool:
+    """Can this host actually read the source? Used to auto-hide sources whose
+    bucket needs creds this host lacks (e.g. the vendor bucket on the EC2 box)."""
+    try:
+        s3.list_dirs(src.prefix, bucket=src.bucket)
+        return True
+    except Exception:
+        return False
+
+
 def get_sources(specs) -> dict[str, Source]:
     global _SOURCES
     if not _SOURCES:
-        _SOURCES = {s["id"]: _KINDS[s["kind"]](s) for s in specs}
+        out = {}
+        for s in specs:
+            src = _KINDS[s["kind"]](s)
+            # Sources flagged requires_access only register where readable.
+            if s.get("requires_access") and not _accessible(src):
+                continue
+            out[s["id"]] = src
+        _SOURCES = out
     return _SOURCES
 
 
