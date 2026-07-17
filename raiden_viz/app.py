@@ -26,9 +26,11 @@ def _src(sid: str):
 
 @app.get("/api/sources")
 def list_sources():
-    """The datasets this viewer can browse."""
+    """The datasets this viewer can browse. Only sources actually readable on
+    this host are listed (access-gated ones auto-hide where creds are missing)."""
+    available = sources.get_sources(config.SOURCES)  # access-filtered registry
     return {"sources": [{"id": s["id"], "label": s["label"], "kind": s["kind"]}
-                        for s in config.SOURCES]}
+                        for s in config.SOURCES if s["id"] in available]}
 
 
 @app.get("/api/health")
