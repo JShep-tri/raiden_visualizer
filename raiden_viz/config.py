@@ -27,7 +27,21 @@ SOURCES = [
     # (/<cam>, -state) and H.265 video — all handled by the yam adapter/decoder.
     {"id": "abc130k", "label": "ABC-130k", "kind": "yam", "bucket": S3_BUCKET,
      "prefix": "vla_foundry_datasets_test/raw_datasets_bot/abc-130k/data/train", "mcap_name": "episode.mcap"},
+    # The xdof VENDOR bucket copy of the zed collection — carries inline
+    # /subtask-annotation labels (which the tri-ml mirror lacks). Readable only via
+    # the manip-cluster SSO profile (see BUCKET_PROFILES).
+    {"id": "xdof_zed", "label": "YAM (xdof zed)", "kind": "yam", "bucket": "xdof-yam-data",
+     "prefix": "2026_03_30_zed", "mcap_name": "output.mcap"},
 ]
+
+# Buckets that require a specific AWS profile (SSO) rather than the default
+# credentials/instance-role. The xdof vendor bucket is granted to the
+# Robotics-LBM-PowerUserAccess role in acct 682769330988 (the 'manip-cluster'
+# profile), not to the default puget role or the EC2 instance role.
+import json as _json
+BUCKET_PROFILES = _json.loads(os.environ.get("RAIDEN_BUCKET_PROFILES", "{}")) or {
+    "xdof-yam-data": os.environ.get("RAIDEN_XDOF_PROFILE", "manip-cluster"),
+}
 
 # Local cache for downloaded .svo2 files and transcoded .mp4 clips. Decoding is
 # expensive, so results are memoized on disk keyed by the S3 object's ETag+size.
