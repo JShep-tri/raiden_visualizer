@@ -798,6 +798,14 @@ function updateTransportUI(secs) {
   }
 }
 
+// Consistent empty-state across every metadata section: rather than hide a card
+// or silently drop it, always render the section and say the data isn't available
+// for this episode. Messages stay source-agnostic (no raiden-only filenames).
+function notAvailable(container, msg) {
+  container.innerHTML = "";
+  container.appendChild(el("div", "subtle empty-note", msg || "Not available for this episode."));
+}
+
 function renderMeta(md, d) {
   const grid = $("#meta-grid");
   grid.innerHTML = "";
@@ -812,12 +820,15 @@ function renderMeta(md, d) {
     ["Robot frames", md.robot_frames != null ? md.robot_frames : rs.num_steps],
     ["Robot rate", md.robot_hz != null ? `${md.robot_hz} Hz`
                    : rs.hz != null ? `${rs.hz} Hz` : null],
+    ["Control rate", md.control_hz != null ? `${md.control_hz} Hz` : null],
     ["Camera FPS", md.camera_fps],
+    ["Arm", md.arm_type],
     ["Cameras", (d.cameras || []).length || null],
     ["Subtasks", md.num_annotations || null],
     ["Timestamp", md.timestamp ? md.timestamp.replace("T", " ").slice(0, 19) : null],
     ["Converted", md.converted != null ? String(md.converted) : null],
   ];
+  let shown = 0;
   rows.forEach(([k, val]) => {
     if (val == null || val === "") return;
     const row = el("div", "meta-row");
@@ -825,19 +836,20 @@ function renderMeta(md, d) {
     const isMono = k === "Timestamp" || k === "Robot frames";
     row.appendChild(el("div", "meta-val" + (isMono ? " mono" : ""), String(val)));
     grid.appendChild(row);
+    shown++;
   });
+  if (!shown) notAvailable(grid, "No metadata available for this episode.");
 }
 
-// YAM episodes carry subtask annotations with timestamps — show them as a list.
+// Subtask annotations (timestamped). The card is always shown; when an episode
+// has none, it says so rather than vanishing — consistent with the other sections.
 function renderAnnotations(anns) {
-  let card = $("#annotations-card");
+  const body = $("#annotations-body");
+  if (!body) return;
   if (!anns.length) {
-    if (card) card.classList.add("hidden");
+    notAvailable(body, "No subtask annotations for this episode.");
     return;
   }
-  if (!card) return;  // card exists in HTML; guard for safety
-  card.classList.remove("hidden");
-  const body = $("#annotations-body");
   body.innerHTML = "";
   anns.forEach((a) => {
     const row = el("div", "ann-row");
@@ -856,9 +868,9 @@ function renderPlots(robot) {
   wrap.innerHTML = "";
   state.plots = [];
   state.robotDuration = 0;
-  if (!robot || !robot.signals) {
+  if (!robot || !robot.signals || !Object.keys(robot.signals).length) {
     $("#plot-summary").textContent = "";
-    wrap.appendChild(el("div", "subtle", "No robot_data.npz for this episode."));
+    notAvailable(wrap, "No robot trajectories available for this episode.");
     return;
   }
   const s = robot.summary || {};
@@ -1008,11 +1020,15 @@ function renderCalibration(calib, cameras) {
   const body = $("#calib-body");
   body.innerHTML = "";
   const card = $(".calib-card");
-  if (!calib || !calib.cameras) {
+  if (!calib || !calib.cameras || !Object.keys(calib.cameras).length) {
     card.classList.add("collapsed");
-    body.appendChild(el("div", "subtle", "No calibration_results.json for this episode."));
+    notAvailable(body, "No camera calibration available for this episode.");
     return;
   }
+  // The "Check alignment" hint only makes sense when some camera actually offers
+  // that overlay (needs base-frame extrinsics — raiden only, not the xdof sidecar).
+  const anyOverlay = Object.values(calib.cameras).some((c) => c.extrinsics);
+  $(".calib-hint").classList.toggle("hidden", !anyOverlay);
   Object.entries(calib.cameras).forEach(([name, c]) => {
     const box = el("div", "calib-cam");
     const h = el("h4", null, prettyCam(name));
@@ -1029,6 +1045,12 @@ function renderCalibration(calib, cameras) {
       kv(box, "size", c.intrinsics.image_size.join("×"));
     }
     if (c.serial_number) kv(box, "serial", String(c.serial_number));
+    // Distortion (xdof sidecar carries it; raiden's rectified calib does not).
+    if (c.distortion && c.distortion.length) {
+      kv(box, "distortion", c.distortion.map((x) => x.toFixed(4)).join(", "));
+      if (c.distortion_model) kv(box, "model", c.distortion_model);
+    }
+    if (c.baseline_m) kv(box, "baseline", `${(c.baseline_m * 1000).toFixed(1)} mm`);
     // Calibration check: only scene-type cameras carry base-frame extrinsics we
     // can project. A button renders the arm-base axes onto a still frame.
     if (c.extrinsics) {

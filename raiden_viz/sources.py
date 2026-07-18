@@ -332,6 +332,7 @@ class YamMcapSource(Source):
                         mr["annotations"] = yam.read_annotation_mcap(atmp, mr.get("start_abs", 0.0))
                     finally:
                         atmp.unlink(missing_ok=True)
+
             ex = {"etag": obj.etag, "cameras": probe["cameras"], **mr}
             meta_json.write_text(json.dumps(ex))
             return ex
@@ -349,15 +350,35 @@ class YamMcapSource(Source):
             raise FileNotFoundError(f"no output.mcap for {task}/{episode}")
         return obj
 
+    def _sidecar(self, episode) -> dict:
+        """Fetch + split the per-episode metadata sidecar, if this source has one.
+        Keyed by the episode uuid (``episode_<uuid>`` -> ``<prefix>/<uuid>.json``).
+        Small (~3 KB) and read live per view, so it stays out of the MCAP cache."""
+        prefix = self.spec.get("metadata_prefix")
+        if not prefix:
+            return {}
+        uuid = episode[len("episode_"):] if episode.startswith("episode_") else episode
+        raw = s3.try_get_json(f"{prefix}/{uuid}.json", bucket=self.bucket)
+        return yam.parse_sidecar(raw) if raw else {}
+
     def episode_detail(self, task, episode):
         ex = self._mine(self._head(task, episode), task, episode)
         cameras = [{"name": c, "has_video": True, "eyes": ["left"]} for c in ex["cameras"]]
+        sidecar = self._sidecar(episode)
+        sm = sidecar.get("sidecar_meta") or {}
+        metadata = {"task_instruction": ex.get("instruction"),
+                    "num_annotations": len(ex.get("annotations") or [])}
+        if sm.get("duration_s") is not None:
+            metadata["duration_s"] = round(sm["duration_s"], 2)
+        if sm.get("env_loop_frequency") is not None:
+            metadata["control_hz"] = sm["env_loop_frequency"]
+        if sm.get("arm_type") is not None:
+            metadata["arm_type"] = sm["arm_type"]
         return {
             "source": self.id, "task": task, "episode": episode,
             "instruction": ex.get("instruction"), "status": None,
-            "metadata": {"task_instruction": ex.get("instruction"),
-                         "num_annotations": len(ex.get("annotations") or [])},
-            "calibration": None, "cameras": cameras,
+            "metadata": metadata,
+            "calibration": sidecar.get("calibration"), "cameras": cameras,
             "robot": ex.get("robot"), "annotations": ex.get("annotations") or [],
         }
 

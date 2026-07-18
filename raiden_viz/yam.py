@@ -339,6 +339,62 @@ def read_annotation_mcap(mcap_path: Path, start_abs: float) -> list:
     return _rel_annotations(anns, start_abs)
 
 
+# Sidecar intrinsics subkey -> a name suffix for the emitted calibration camera.
+# Two sidecar variants exist: rectified ZED (stereo, "left_rgb"/"right_rgb") and
+# the five-hour collection (mono, "rgb").
+_INTR_SUFFIX = {"rgb": "", "left_rgb": "_left", "right_rgb": "_right"}
+
+
+def parse_sidecar(raw: dict) -> dict:
+    """Split an xdof ``metadata_202507/<uuid>.json`` sidecar into the viewer's
+    calibration shape plus a few episode-level fields the MCAP itself lacks.
+
+    Cameras are keyed ``top_camera`` / ``left_camera`` / ``right_camera`` (the
+    overhead ZED + the two wrist cams). Intrinsics live under a sub-map that is
+    either ``rgb`` (mono) or ``left_rgb``/``right_rgb`` (the rectified ZED
+    stereo pair), so we emit one calibration entry per (camera, stereo eye) that
+    actually carries an ``intrinsics_matrix``. There are no base-frame extrinsics
+    (only the stereo baseline), so no "check alignment" overlay is offered."""
+    cams = {}
+    for name, ci in (raw.get("camera_info") or {}).items():
+        base = name[: -len("_camera")] if name.endswith("_camera") else name
+        wh = [ci["width"], ci["height"]] if ci.get("width") and ci.get("height") else None
+        for sub, intr in (ci.get("intrinsics") or {}).items():
+            km = intr.get("intrinsics_matrix")
+            if not km:
+                continue
+            entry = {"intrinsics": {"camera_matrix": km}}
+            if wh:
+                entry["intrinsics"]["image_size"] = wh
+            dist = intr.get("distortion_coefficients")
+            if dist:
+                entry["distortion"] = dist
+                entry["distortion_model"] = intr.get("distortion_model")
+            cams[base + _INTR_SUFFIX.get(sub, "_" + sub)] = entry
+
+    # Stereo baseline (meters) from the top camera's right-eye extrinsic, if present:
+    # the 4x4's tx component. Notable because it's the metric scale the computed-depth
+    # path lacks — surfaced on the left-eye entry as an informational field.
+    top = (raw.get("camera_info") or {}).get("top_camera") or {}
+    rr = ((top.get("extrinsics") or {}).get("right_rgb") or {}).get("matrix")
+    if rr and "top_left" in cams:
+        baseline = abs(rr[0][3])
+        if baseline:
+            cams["top_left"]["baseline_m"] = round(baseline, 5)
+
+    sm = raw.get("station_metadata") or {}
+    fields = {
+        "duration_s": raw.get("duration"),
+        "env_loop_frequency": raw.get("env_loop_frequency"),
+        "arm_type": sm.get("arm_type"),
+        "world_frame": sm.get("world_frame"),
+    }
+    return {
+        "calibration": {"cameras": cams} if cams else None,
+        "sidecar_meta": {k: v for k, v in fields.items() if v is not None},
+    }
+
+
 def _as_list(msg, field: str) -> list[float]:
     """Return a message field as a float list, whether it's a repeated array
     (RobotState.position[6]) or a scalar (GripperState.position)."""

@@ -31,7 +31,11 @@ SOURCES = [
     # /subtask-annotation labels (which the tri-ml mirror lacks). Readable only via
     # the manip-cluster SSO profile (see BUCKET_PROFILES).
     {"id": "xdof_zed", "label": "YAM (xdof zed)", "kind": "yam", "bucket": "xdof-yam-data",
-     "prefix": "2026_03_30_zed", "mcap_name": "output.mcap", "requires_access": True},
+     "prefix": "2026_03_30_zed", "mcap_name": "output.mcap", "requires_access": True,
+     # Per-episode sidecar JSON (camera intrinsics/distortion + episode fields) that
+     # ships alongside the MCAPs under this prefix, keyed by the episode uuid. The
+     # MCAP carries no intrinsics, so this is the only calibration for xdof.
+     "metadata_prefix": "metadata_202507"},
 ]
 
 # Buckets that require a specific AWS profile (SSO) rather than the default

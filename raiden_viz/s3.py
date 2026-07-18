@@ -73,6 +73,15 @@ def get_json(key: str, bucket: str | None = None) -> dict:
     return json.loads(r["Body"].read())
 
 
+def try_get_json(key: str, bucket: str | None = None) -> dict | None:
+    """get_json, but return None if the object is missing (not every episode has
+    an optional sidecar)."""
+    try:
+        return get_json(key, bucket=bucket)
+    except Exception:
+        return None
+
+
 def download(key: str, dest, bucket: str | None = None) -> None:
     _client(bucket).download_file(_bucket(bucket), key, str(dest))
 

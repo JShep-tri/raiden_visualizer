@@ -31,6 +31,8 @@ body {
 .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
 .hidden { display: none !important; }
 .subtle { color: var(--text-dim); }
+/* Consistent empty state for any metadata section lacking data for an episode. */
+.empty-note { padding: 6px 2px; font-size: 12.5px; font-style: italic; }
 h1, h2, h3 { margin: 0; font-weight: 600; }
 
 /* ---------- Sidebar ---------- */
