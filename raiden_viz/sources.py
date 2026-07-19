@@ -15,13 +15,20 @@ RaidenSource: <prefix>/<task>/<episode>/{metadata.json, cameras/*.svo2, robot_da
 YamMcapSource: <prefix>/<task>/episode_<uuid>/output.mcap  (one Foxglove-protobuf MCAP)
 """
 
+import hashlib
 import json
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import cache, calib_overlay, fk, robot_data, s3, svo, yam
+
+# In-flight/finished background stat scans, keyed by a per-source scan id. Held in
+# memory (a scan is cheap to restart and its per-episode records are disk-cached).
+_SCANS: dict[str, dict] = {}
+_SCANS_GUARD = threading.Lock()
 
 
 def _ee_traces(npz_path, calibration) -> dict | None:
@@ -134,16 +141,18 @@ class Source:
             "stations": sorted(stations), "tasks": per_task,
         }
 
-    # Per-source cap on how many episodes analytics will sample. Reading stats is
-    # cheap per episode but datasets can have tens of thousands of episodes, so we
-    # sample (evenly per task) and report what was covered rather than stalling.
+    # Per-source cap on how many episodes a *quick* (non-full) stats pass samples.
+    # Reading one stat is cheap, but datasets can have tens of thousands of
+    # episodes, so the default charts pass samples (evenly per task) and reports
+    # coverage. A filter needs every episode, so it requests a full scan instead.
     STATS_MAX = 1200
 
-    def _stat_pairs(self) -> tuple[list[tuple[str, str]], int]:
-        """(task, episode) pairs to sample for stats, plus the true total count."""
+    def _stat_pairs(self, full: bool) -> tuple[list[tuple[str, str]], int]:
+        """(task, episode) pairs to read for stats, plus the true total count.
+        ``full`` reads every episode; otherwise sample down to STATS_MAX."""
         by_task = {t: self.list_episodes(t) for t in self.list_tasks()}
         total = sum(len(v) for v in by_task.values())
-        if total <= self.STATS_MAX:
+        if full or total <= self.STATS_MAX:
             return [(t, e) for t, eps in by_task.items() for e in eps], total
         # Evenly subsample within each task, proportional to its size.
         pairs = []
@@ -153,8 +162,10 @@ class Source:
             pairs.extend((t, eps[i]) for i in range(0, len(eps), step))
         return pairs, total
 
-    def stats(self) -> dict:
-        pairs, total = self._stat_pairs()
+    def stats(self, full: bool = False) -> dict:
+        """Synchronous stats pass (used for the charts). For a full scan of a huge
+        source prefer scan_start()/scan_snapshot(), which stream progress."""
+        pairs, total = self._stat_pairs(full)
         episodes = []
         with ThreadPoolExecutor(max_workers=32) as pool:
             for fut in [pool.submit(self._safe_stat, t, e) for t, e in pairs]:
@@ -165,15 +176,99 @@ class Source:
         return {
             "num_episodes": len(episodes),
             "total_episodes": total,
+            "scanned": len(episodes),
             "sampled": len(pairs) < total,
-        "episodes": episodes,
+            "episodes": episodes,
         }
 
+    # ---- cached per-episode stats + background full scan (for filtering) ----
+
+    def _stat_cache_key(self, task, episode) -> str | None:
+        """Cache filename for one episode's stat record, keyed by the cheap head's
+        etag so a re-uploaded episode invalidates. None if the object is missing."""
+        obj = self._stat_head(task, episode)
+        if obj is None:
+            return None
+        return f"stat_{self.id}_{obj.etag}.json"
+
+    def _stat_head(self, task, episode):
+        """The small object whose etag identifies this episode's content (the
+        metadata.json for raiden, the MCAP for yam). Overridden per source."""
+        raise NotImplementedError
+
     def _safe_stat(self, task, episode):
+        """episode_stat with disk memoization: stat records are deterministic per
+        content etag, so a full scan is paid once and every later filter is instant."""
+        key = self._stat_cache_key(task, episode)
+        if key:
+            hit = cache.get_json(key)
+            if hit is not None:
+                return hit
         try:
-            return self.episode_stat(task, episode)
+            rec = self.episode_stat(task, episode)
         except Exception:
             return None
+        if rec and key:
+            cache.put_json(key, rec)
+        return rec
+
+    def _scan_id(self) -> str:
+        return hashlib.sha1(f"{self.id}:{self.bucket}:{self.prefix}".encode()).hexdigest()[:12]
+
+    def scan_start(self) -> dict:
+        """Begin (or resume) a background full scan of every episode's stats.
+        Returns an immediate snapshot; poll scan_snapshot() for progress. Idempotent:
+        a scan already running/finished for this source is reused."""
+        sid = self._scan_id()
+        with _SCANS_GUARD:
+            st = _SCANS.get(sid)
+            if st and (st["running"] or st["done"]):
+                return self._snapshot(st)
+            pairs, total = self._stat_pairs(full=True)
+            st = {"running": True, "done": False, "total": total,
+                  "episodes": [], "error": None, "lock": threading.Lock()}
+            _SCANS[sid] = st
+        t = threading.Thread(target=self._run_scan, args=(sid, pairs, st), daemon=True)
+        t.start()
+        return self._snapshot(st)
+
+    def _run_scan(self, sid, pairs, st):
+        err = None
+        try:
+            with ThreadPoolExecutor(max_workers=32) as pool:
+                for fut in [pool.submit(self._safe_stat, t, e) for t, e in pairs]:
+                    rec = fut.result()
+                    if rec:
+                        with st["lock"]:
+                            st["episodes"].append(rec)
+        except Exception as e:  # never leave a scan stuck "running"
+            err = str(e)
+        finally:
+            # Publish the terminal flags UNDER the same lock that guards episodes,
+            # so a poll that observes done=True is guaranteed to also see the final
+            # (complete) episode list — never a torn read that drops the last records.
+            with st["lock"]:
+                st["error"] = err
+                st["running"] = False
+                st["done"] = True
+
+    def scan_snapshot(self) -> dict | None:
+        """Current progress of an in-flight/finished scan, or None if none started."""
+        with _SCANS_GUARD:
+            st = _SCANS.get(self._scan_id())
+        return self._snapshot(st) if st else None
+
+    def _snapshot(self, st) -> dict:
+        # Read the flags and the episode list together under the lock so they can't
+        # disagree (see _run_scan's terminal publish).
+        with st["lock"]:
+            eps = list(st["episodes"])
+            running, done, error = st["running"], st["done"], st["error"]
+        return {
+            "running": running, "done": done,
+            "total_episodes": st["total"], "scanned": len(eps),
+            "error": error, "episodes": eps,
+        }
 
 
 class RaidenSource(Source):
@@ -264,6 +359,9 @@ class RaidenSource(Source):
 
         return cache.get_or_create(f"{obj.etag}_{camera}_calib.png", _produce)
 
+    def _stat_head(self, task, episode):
+        return s3.try_head(f"{self._ep_prefix(task, episode)}/metadata.json", bucket=self.bucket)
+
     def episode_stat(self, task, episode):
         md = s3.get_json(f"{self._ep_prefix(task, episode)}/metadata.json", bucket=self.bucket)
         return {
@@ -272,6 +370,7 @@ class RaidenSource(Source):
             "robot_hz": md.get("robot_hz"), "num_cameras": len(md.get("cameras", [])),
             "status": md.get("status"), "station": md.get("station_name"),
             "timestamp": md.get("timestamp"),
+            "has_annotations": None,  # raiden has no subtask annotations
         }
 
 
@@ -393,12 +492,15 @@ class YamMcapSource(Source):
             raise FileNotFoundError(f"camera {camera!r} not found in {task}/{episode}")
         return mp4
 
+    def _stat_head(self, task, episode):
+        return s3.try_head(self._mcap_key(task, episode), bucket=self.bucket)
+
     def episode_stat(self, task, episode):
-        # Analytics must not trigger 200-880 MB downloads per episode. The episode
-        # duration lives in the MCAP Statistics record in the summary section at
-        # the END of the file, so a small tail range-read gets it cheaply. The MCAP
-        # last-modified time is the closest available wallclock stamp (uuid ids
-        # carry no timestamp).
+        # Analytics/filtering must not trigger 200-880 MB downloads per episode. The
+        # summary section at the END of the MCAP holds duration + per-channel message
+        # counts, so a small tail range-read yields every cheap facet (duration,
+        # cameras, annotations, robot frames). The MCAP last-modified time is the
+        # closest available wallclock stamp (uuid ids carry no timestamp).
         obj = s3.try_head(self._mcap_key(task, episode), bucket=self.bucket)
         if obj is None:
             return None
@@ -406,13 +508,18 @@ class YamMcapSource(Source):
             "task": task, "episode": episode, "num_cameras": None,
             "duration_s": None, "robot_frames": None, "robot_hz": None,
             "status": None, "station": None, "timestamp": obj.last_modified,
+            "has_annotations": None, "n_annotations": None,
         }
-        # Read a tail window; widen once if the summary didn't fit.
-        for window in (2_000_000, 16_000_000):
+        # Read a tail window; widen once if the summary didn't fit. stats_from_tail
+        # returns {} only when the window didn't reach the summary, so break (and
+        # merge every parsed facet) as soon as it returns anything — not solely on
+        # duration, which would discard cameras/annotations from a summary that
+        # happens to lack a Statistics record.
+        for window in (4_000_000, 16_000_000):
             start = max(0, obj.size - window)
             tail = s3.get_range(obj.key, start, obj.size - 1, bucket=self.bucket)
             st = yam.stats_from_tail(tail, obj.size)
-            if st.get("duration_s") is not None:
+            if st:
                 base.update(st)
                 break
         return base

@@ -46,8 +46,27 @@ def overview(sid: str):
 
 
 @app.get("/api/sources/{sid}/stats")
-def stats(sid: str):
-    return _src(sid).stats()
+def stats(sid: str, full: bool = Query(False)):
+    """Per-episode stat records for the charts. ``full=true`` reads every episode
+    synchronously (small sources only); for large sources use the scan endpoints,
+    which stream progress."""
+    return _src(sid).stats(full=full)
+
+
+@app.post("/api/sources/{sid}/scan")
+def scan_start(sid: str):
+    """Kick off (or resume) a cached background full scan of every episode's cheap
+    stats — the data behind the episode filter. Returns an immediate snapshot."""
+    return _src(sid).scan_start()
+
+
+@app.get("/api/sources/{sid}/scan")
+def scan_poll(sid: str):
+    """Progress + accumulated records of an in-flight/finished scan (404 if none)."""
+    snap = _src(sid).scan_snapshot()
+    if snap is None:
+        raise HTTPException(404, "no scan started for this source")
+    return snap
 
 
 @app.get("/api/sources/{sid}/tasks")

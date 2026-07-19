@@ -108,12 +108,17 @@ def probe(mcap_path: Path) -> dict:
 
 
 def stats_from_tail(tail: bytes, total_size: int) -> dict:
-    """Parse duration + per-topic counts from just the MCAP tail (summary section),
-    so analytics can cover every episode without downloading the whole file.
+    """Parse cheap per-episode facets from just the MCAP tail (summary section),
+    so analytics + filtering can cover every episode without downloading the whole
+    file. Returns ``duration_s``, ``num_cameras``, ``has_annotations``,
+    ``n_annotations`` and ``robot_frames`` — all derivable from the summary's
+    Schema/Channel records + the Statistics record's per-channel message counts.
 
     MCAP layout: ... [Summary section] [SummaryOffset section] [Footer(op=0x02,len=20:
-    summary_start(u64), summary_offset_start(u64), crc(u32))] [magic(8)]. The Statistics
-    record (op=0x0B) in the summary holds message_start_time / message_end_time (ns)."""
+    summary_start(u64), summary_offset_start(u64), crc(u32))] [magic(8)]. The summary
+    repeats every Schema (0x03) + Channel (0x04) record and holds one Statistics
+    record (0x0B) with message_start_time / message_end_time (ns) and a
+    channel_message_counts map."""
     import struct
 
     if len(tail) < 8 + 29 or tail[-8:] != b"\x89MCAP0\r\n":
@@ -128,24 +133,65 @@ def stats_from_tail(tail: bytes, total_size: int) -> dict:
         return {}  # tail window didn't reach the summary; caller can widen it
 
     end = fo
+    schema_name: dict[int, str] = {}     # schema id -> schema name
+    chan_topic: dict[int, str] = {}      # channel id -> topic
+    chan_schema: dict[int, int] = {}     # channel id -> schema id
+    counts: dict[int, int] = {}          # channel id -> message count
     start_ns = end_ns = None
-    proprio_arm_count = 0
     while p < end - 9:
         op = tail[p]
         (rlen,) = struct.unpack_from("<Q", tail, p + 1)
         p += 9
         rec = tail[p:p + rlen]
         p += rlen
-        if op == 0x0B and len(rec) >= 42:  # Statistics record
+        if op == 0x03:  # Schema: id(u16), name(str), ...
+            sid, = struct.unpack_from("<H", rec, 0)
+            o = 2
+            nl, = struct.unpack_from("<I", rec, o); o += 4
+            schema_name[sid] = rec[o:o + nl].decode("utf8", "replace")
+        elif op == 0x04:  # Channel: id(u16), schema_id(u16), topic(str), ...
+            cid, schid = struct.unpack_from("<HH", rec, 0)
+            o = 4
+            tl, = struct.unpack_from("<I", rec, o); o += 4
+            chan_topic[cid] = rec[o:o + tl].decode("utf8", "replace")
+            chan_schema[cid] = schid
+        elif op == 0x0B and len(rec) >= 42:  # Statistics
             # message_count(u64), schema_count(u16), channel_count(u32),
             # attachment_count(u32), metadata_count(u32), chunk_count(u32),
-            # message_start_time(u64), message_end_time(u64), ...
+            # message_start_time(u64), message_end_time(u64), then a
+            # channel_message_counts map<u16,u64> prefixed by its u32 byte length.
             o = 8 + 2 + 4 + 4 + 4 + 4
-            start_ns, end_ns = struct.unpack_from("<QQ", rec, o)
+            start_ns, end_ns = struct.unpack_from("<QQ", rec, o); o += 16
+            if o + 4 <= len(rec):
+                (maplen,) = struct.unpack_from("<I", rec, o); o += 4
+                mend = min(o + maplen, len(rec))
+                while o + 10 <= mend:
+                    cid, cnt = struct.unpack_from("<HQ", rec, o); o += 10
+                    counts[cid] = cnt
+
+    out: dict = {}
     # message_start_time can legitimately be 0 (YAM episodes start at t=0), so
     # guard on end_ns rather than truthiness of start.
-    dur = round((end_ns - start_ns) / 1e9, 3) if end_ns is not None else None
-    return {"duration_s": dur}
+    if end_ns is not None:
+        out["duration_s"] = round((end_ns - start_ns) / 1e9, 3)
+    # Cameras: channels whose schema is CompressedVideo (same test as probe()).
+    ncam = sum(1 for cid, sid in chan_schema.items()
+               if schema_name.get(sid) == _CAMERA_SCHEMA)
+    if ncam:
+        out["num_cameras"] = ncam
+    # Only assert annotation/robot facets if we actually parsed the channel list
+    # (i.e. the window reached the summary). Inline /subtask-annotation only; a
+    # sibling annotation.mcap (ABC-130k) is not counted here.
+    if chan_topic:
+        ann = [cid for cid, t in chan_topic.items() if t == "/subtask-annotation"]
+        n_ann = sum(counts.get(c, 0) for c in ann)
+        out["has_annotations"] = n_ann > 0
+        out["n_annotations"] = n_ann
+        proprio = [cid for cid, t in chan_topic.items() if is_proprio_topic(t)]
+        rf = max((counts.get(c, 0) for c in proprio), default=0)
+        if rf:
+            out["robot_frames"] = rf
+    return out
 
 
 # Map the CompressedVideo `format` string to ffmpeg's raw-elementary demuxer.

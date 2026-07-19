@@ -24,6 +24,7 @@ const state = {
   playing: false,
   raf: null,
   eeTraceOn: true,   // show the end-effector future-trace overlay
+  filter: null,      // { records, coverage, active:{field->constraint}, scanning }
 };
 
 async function api(path) {
@@ -218,6 +219,14 @@ async function renderAnalytics(taskOrder) {
   drawHistogram(eps);
   drawScatter(eps, colors);
 
+  // Seed the episode filter from the same records the charts use. On small
+  // sources this sample IS every episode; on large ones it's a sample until the
+  // user runs a full scan (the "Scan all" button).
+  initFilter(stats.episodes || [], {
+    total: stats.total_episodes, scanned: stats.scanned ?? (stats.episodes || []).length,
+    sampled: !!stats.sampled, full: false,
+  });
+
   // Honestly label sampling: if the source subsampled, say so.
   const suffix = stats.sampled ? ` (sampled of ${stats.total_episodes.toLocaleString()})` : "";
   $("#hist-hint").textContent = `${eps.length} episodes${suffix}`;
@@ -290,6 +299,215 @@ function updatePerTaskHours(eps, stats, estimated) {
     const txt = h >= 10 ? h.toFixed(0) : h.toFixed(1);
     cell.textContent = (estimated ? "~" : "") + txt + "h";
   });
+}
+
+/* ---------------- Episode filter ---------------- */
+
+// Filterable attributes, in display order. Each facet declares its kind and how to
+// read its value from an episode stat record. A facet only appears if at least one
+// scanned episode carries a non-null value for it — otherwise it renders disabled
+// as "not available for this dataset" (consistent with the metadata empty states).
+const FILTER_FACETS = [
+  { field: "task", label: "Task", kind: "enum", get: (e) => e.task },
+  { field: "duration_s", label: "Duration (s)", kind: "range", get: (e) => e.duration_s },
+  { field: "status", label: "Status", kind: "enum", get: (e) => e.status },
+  { field: "station", label: "Station", kind: "enum", get: (e) => e.station },
+  { field: "num_cameras", label: "Cameras", kind: "range", get: (e) => e.num_cameras, int: true },
+  { field: "robot_frames", label: "Robot frames", kind: "range", get: (e) => e.robot_frames, int: true },
+  { field: "has_annotations", label: "Annotations", kind: "bool", get: (e) => e.has_annotations },
+];
+
+function initFilter(records, coverage) {
+  state.filter = { records, coverage, active: {}, scanning: false };
+  buildFilterFacets();
+  applyFilter();
+  const btn = $("#filter-scan-btn");
+  btn.onclick = startFullScan;
+  btn.disabled = false;  // a prior source's aborted scan may have left it disabled
+  // Only offer "Scan all" when the current records are an incomplete sample.
+  btn.classList.toggle("hidden", !coverage.sampled);
+}
+
+// A facet is "available" if some record has a non-null value for its field.
+function facetAvailable(f) {
+  return state.filter.records.some((e) => {
+    const v = f.get(e);
+    return v !== null && v !== undefined && v !== "";
+  });
+}
+
+function buildFilterFacets() {
+  const wrap = $("#filter-controls");
+  wrap.innerHTML = "";
+  FILTER_FACETS.forEach((f) => {
+    const box = el("div", "facet");
+    box.appendChild(el("div", "facet-label", f.label));
+    if (!facetAvailable(f)) {
+      box.classList.add("facet-disabled");
+      box.appendChild(el("div", "facet-na subtle", "not available for this dataset"));
+      wrap.appendChild(box);
+      return;
+    }
+    if (f.kind === "range") buildRangeFacet(box, f);
+    else if (f.kind === "enum") buildEnumFacet(box, f);
+    else if (f.kind === "bool") buildBoolFacet(box, f);
+    wrap.appendChild(box);
+  });
+}
+
+function buildRangeFacet(box, f) {
+  const vals = state.filter.records.map(f.get).filter((v) => v != null);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (f.int) { lo = Math.floor(lo); hi = Math.ceil(hi); }
+  const row = el("div", "facet-range");
+  const minIn = Object.assign(document.createElement("input"),
+    { type: "number", value: f.int ? lo : Math.floor(lo), min: lo, max: hi, className: "facet-num" });
+  const maxIn = Object.assign(document.createElement("input"),
+    { type: "number", value: f.int ? hi : Math.ceil(hi), min: lo, max: hi, className: "facet-num" });
+  const sync = () => {
+    // An empty/invalid box means "no bound on that side" — treat as ±∞ rather than
+    // NaN (every comparison against NaN is false, which would hide all episodes).
+    const a = parseFloat(minIn.value), b = parseFloat(maxIn.value);
+    const loB = Number.isNaN(a) ? -Infinity : a;
+    const hiB = Number.isNaN(b) ? Infinity : b;
+    state.filter.active[f.field] = (e) => {
+      const v = f.get(e);
+      return v != null && v >= loB && v <= hiB;
+    };
+    applyFilter();
+  };
+  minIn.oninput = sync; maxIn.oninput = sync;
+  row.appendChild(minIn);
+  row.appendChild(el("span", "facet-dash", "–"));
+  row.appendChild(maxIn);
+  box.appendChild(row);
+}
+
+function buildEnumFacet(box, f) {
+  const seen = [...new Set(state.filter.records.map(f.get).filter((v) => v != null && v !== ""))].sort();
+  const row = el("div", "facet-chips");
+  const chosen = new Set();
+  seen.forEach((val) => {
+    const chip = el("button", "facet-chip", String(val));
+    chip.onclick = () => {
+      if (chosen.has(val)) { chosen.delete(val); chip.classList.remove("on"); }
+      else { chosen.add(val); chip.classList.add("on"); }
+      state.filter.active[f.field] = chosen.size
+        ? (e) => chosen.has(f.get(e))
+        : null;
+      applyFilter();
+    };
+    row.appendChild(chip);
+  });
+  box.appendChild(row);
+}
+
+function buildBoolFacet(box, f) {
+  const row = el("div", "facet-chips");
+  const opts = [["any", null], ["yes", true], ["no", false]];
+  opts.forEach(([lbl, want], i) => {
+    const chip = el("button", "facet-chip" + (i === 0 ? " on" : ""), lbl);
+    chip.onclick = () => {
+      row.querySelectorAll(".facet-chip").forEach((c) => c.classList.remove("on"));
+      chip.classList.add("on");
+      state.filter.active[f.field] = want === null ? null : (e) => f.get(e) === want;
+      applyFilter();
+    };
+    row.appendChild(chip);
+  });
+  box.appendChild(row);
+}
+
+// Run every active predicate over the records (AND semantics) and render matches.
+function applyFilter() {
+  const { records, active } = state.filter;
+  const preds = Object.values(active).filter(Boolean);
+  const matches = records.filter((e) => preds.every((p) => p(e)));
+  renderFilterResults(matches);
+  updateFilterCoverage(matches.length);
+}
+
+function updateFilterCoverage(matchCount) {
+  const { coverage, records } = state.filter;
+  const scanned = records.length;
+  const parts = [];
+  if (matchCount != null) parts.push(`${matchCount.toLocaleString()} matching`);
+  parts.push(coverage.sampled && !coverage.full
+    ? `of ${scanned.toLocaleString()} sampled (dataset has ${coverage.total.toLocaleString()})`
+    : `of ${scanned.toLocaleString()} scanned`);
+  $("#filter-coverage").textContent = parts.join(" ");
+}
+
+const FILTER_RESULT_CAP = 200;
+
+function renderFilterResults(matches) {
+  const wrap = $("#filter-results");
+  wrap.innerHTML = "";
+  if (!matches.length) {
+    wrap.appendChild(el("div", "subtle empty-note", "No episodes match the current filters."));
+    return;
+  }
+  const shown = matches.slice(0, FILTER_RESULT_CAP);
+  shown.forEach((e) => {
+    const row = el("div", "fr-row");
+    row.appendChild(el("div", "fr-task", e.task));
+    row.appendChild(el("div", "fr-ep mono", parseEpisodeName(e.episode).name));
+    row.appendChild(el("div", "fr-dur mono", e.duration_s != null ? `${e.duration_s.toFixed(1)}s` : "—"));
+    const tags = el("div", "fr-tags");
+    if (e.status) tags.appendChild(el("span", "fr-tag " + e.status, e.status));
+    if (e.has_annotations) tags.appendChild(el("span", "fr-tag ann", `${e.n_annotations ?? "?"} subtasks`));
+    if (e.num_cameras) tags.appendChild(el("span", "fr-tag", `${e.num_cameras} cam`));
+    row.appendChild(tags);
+    row.onclick = () => { selectTask(e.task, e.episode); };
+    wrap.appendChild(row);
+  });
+  if (matches.length > shown.length) {
+    wrap.appendChild(el("div", "fr-more subtle",
+      `+${(matches.length - shown.length).toLocaleString()} more — narrow the filters`));
+  }
+}
+
+// Upgrade from the sampled seed to full coverage: kick off the background scan and
+// poll, refreshing the filter as records stream in. Cached, so re-runs are fast.
+async function startFullScan() {
+  if (state.filter.scanning) return;
+  state.filter.scanning = true;
+  const forSource = state.source;
+  const btn = $("#filter-scan-btn");
+  btn.disabled = true;
+  try {
+    await fetch(`${apiBase()}/scan`, { method: "POST" });
+    while (true) {
+      const snap = await api(`${apiBase()}/scan`);
+      if (forSource !== state.source) return;  // user switched away
+      // Refresh records live but DON'T rebuild facets mid-scan (that would reset
+      // the inputs the user is touching); just re-apply their predicates. Rebuild
+      // once at the end so newly-seen values widen ranges / reveal chips.
+      state.filter.records = snap.episodes;
+      state.filter.coverage = { total: snap.total_episodes, scanned: snap.scanned,
+                                sampled: true, full: snap.done };
+      $("#filter-scan-status").textContent =
+        `scanning ${snap.scanned.toLocaleString()} / ${snap.total_episodes.toLocaleString()}…`;
+      applyFilter();
+      if (snap.done) {
+        // Rebuild facets so newly-seen values widen ranges / reveal chips — but
+        // ONLY if the user hasn't set any filter yet. Rebuilding resets controls to
+        // their default (unfiltered) display, which would desync from still-active
+        // predicates; when filters are active we keep the current controls as-is.
+        if (!Object.values(state.filter.active).some(Boolean)) buildFilterFacets();
+        applyFilter();
+        $("#filter-scan-status").textContent = `scanned all ${snap.scanned.toLocaleString()}`;
+        btn.classList.add("hidden");
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  } catch (e) {
+    $("#filter-scan-status").textContent = "scan failed: " + e.message;
+  } finally {
+    state.filter.scanning = false;
+    btn.disabled = false;  // always recover the button (abort, error, or success)
+  }
 }
 
 function setupCanvas(id) {

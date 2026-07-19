@@ -6,6 +6,7 @@ file and are moved into place with an atomic ``os.replace``, so a concurrent
 build can never serve a half-written file.
 """
 
+import json
 import os
 import threading
 import time
@@ -50,6 +51,31 @@ def get_or_create(cache_name: str, produce) -> Path:
         tmp.replace(dest)
     _maybe_evict()
     return dest
+
+
+def get_json(cache_name: str) -> dict | None:
+    """Read a small cached JSON blob (e.g. a per-episode stat record), or None on
+    miss/corruption. Bumps mtime so the LRU keeps hot records."""
+    dest = path_for(cache_name)
+    try:
+        if dest.exists() and dest.stat().st_size > 0:
+            dest.touch()
+            return json.loads(dest.read_text())
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def put_json(cache_name: str, value: dict) -> None:
+    """Write a small JSON blob atomically. Best-effort: caching a stat record must
+    never break the request that produced it."""
+    dest = path_for(cache_name)
+    try:
+        tmp = dest.with_suffix(dest.suffix + f".tmp{os.getpid()}_{int(time.time()*1000)%100000}")
+        tmp.write_text(json.dumps(value))
+        tmp.replace(dest)
+    except OSError:
+        pass
 
 
 def evict(headroom_gb: float = 0.0) -> None:
