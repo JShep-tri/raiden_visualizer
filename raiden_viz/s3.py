@@ -82,6 +82,13 @@ def try_get_json(key: str, bucket: str | None = None) -> dict | None:
         return None
 
 
+def get_bytes(key: str, bucket: str | None = None) -> bytes:
+    """Fetch an object's full body into memory (used for the small LeRobot meta +
+    data parquets — hundreds of KB — that don't warrant the on-disk clip cache)."""
+    r = _client(bucket).get_object(Bucket=_bucket(bucket), Key=key)
+    return r["Body"].read()
+
+
 def download(key: str, dest, bucket: str | None = None) -> None:
     _client(bucket).download_file(_bucket(bucket), key, str(dest))
 
@@ -103,4 +110,20 @@ def list_files(prefix: str, bucket: str | None = None) -> list[S3Object]:
             if key == prefix:
                 continue
             out.append(S3Object(key=key, size=obj["Size"], etag=obj["ETag"].strip('"')))
+    return out
+
+
+def list_keys(prefix: str, bucket: str | None = None, suffix: str | None = None) -> list[S3Object]:
+    """Recursively list every object under a prefix (no delimiter), optionally
+    filtered by key suffix. Used to walk LeRobot's chunk-*/file-* subtrees."""
+    prefix = prefix.rstrip("/") + "/"
+    paginator = _client(bucket).get_paginator("list_objects_v2")
+    out: list[S3Object] = []
+    for page in paginator.paginate(Bucket=_bucket(bucket), Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/") or (suffix and not key.endswith(suffix)):
+                continue
+            out.append(S3Object(key=key, size=obj["Size"], etag=obj["ETag"].strip('"'),
+                                last_modified=obj["LastModified"].isoformat() if obj.get("LastModified") else None))
     return out
