@@ -23,7 +23,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import cache, calib_overlay, fk, robot_data, s3, svo, yam
+from . import cache, calib_overlay, fk, lerobot, robot_data, s3, svo, yam
 
 # In-flight/finished background stat scans, keyed by a per-source scan id. Held in
 # memory (a scan is cheap to restart and its per-episode records are disk-cached).
@@ -369,6 +369,7 @@ class RaidenSource(Source):
             "duration_s": md.get("duration_s"), "robot_frames": md.get("robot_frames"),
             "robot_hz": md.get("robot_hz"), "num_cameras": len(md.get("cameras", [])),
             "status": md.get("status"), "station": md.get("station_name"),
+            "teacher": md.get("teacher_name"), "control": md.get("control"),
             "timestamp": md.get("timestamp"),
             "has_annotations": None,  # raiden has no subtask annotations
         }
@@ -507,7 +508,8 @@ class YamMcapSource(Source):
         base = {
             "task": task, "episode": episode, "num_cameras": None,
             "duration_s": None, "robot_frames": None, "robot_hz": None,
-            "status": None, "station": None, "timestamp": obj.last_modified,
+            "status": None, "station": None, "teacher": None, "control": None,
+            "timestamp": obj.last_modified,
             "has_annotations": None, "n_annotations": None,
         }
         # Read a tail window; widen once if the summary didn't fit. stats_from_tail
@@ -525,7 +527,215 @@ class YamMcapSource(Source):
         return base
 
 
-_KINDS = {"raiden": RaidenSource, "yam": YamMcapSource}
+class LeRobotSource(Source):
+    """LeRobot v3.0 datasets: ``<prefix>/<task>/{meta,data,videos}``.
+
+    Each task folder is a self-contained LeRobot dataset. Unlike the raiden/yam
+    layouts (one folder or one MCAP per episode), many episodes may be PACKED into
+    shared parquet/mp4 files; ``meta/episodes`` maps each episode_index to its data
+    file, its per-camera video file, and the ``[from_ts, to_ts]`` slice within them.
+
+    Timeseries (observation.state/action, subtask labels) live in the packed data
+    parquet; video is AV1 and is transcoded to browser-safe H.264 on demand,
+    trimmed to the episode's window. Per-task metadata (info/tasks/episodes) is
+    small and read once, then memoized in memory."""
+
+    def __init__(self, spec: dict):
+        super().__init__(spec)
+        self._meta_cache: dict[str, dict] = {}
+        self._meta_lock = threading.Lock()
+
+    # LeRobot indexes episodes by integer; expose them as zero-padded names so the
+    # existing string-keyed API routes/frontend work unchanged.
+    def _ep_name(self, idx: int) -> str:
+        return f"episode_{int(idx):06d}"
+
+    def _ep_index(self, name: str) -> int:
+        return int(name.rsplit("_", 1)[-1])
+
+    def _task_root(self, task: str) -> str:
+        return f"{self.prefix}/{task}"
+
+    def _load_meta(self, task: str) -> dict:
+        root = self._task_root(task)
+        info = lerobot.parse_info(s3.get_json(f"{root}/meta/info.json", bucket=self.bucket))
+        tasks_tbl = lerobot.read_table(s3.get_bytes(f"{root}/meta/tasks.parquet", bucket=self.bucket))
+        task_map = lerobot.parse_tasks(tasks_tbl)
+        # meta/episodes may itself be chunked across several parquet files.
+        episodes: dict[int, dict] = {}
+        for obj in sorted(s3.list_keys(f"{root}/meta/episodes", bucket=self.bucket, suffix=".parquet"),
+                          key=lambda o: o.key):
+            tbl = lerobot.read_table(s3.get_bytes(obj.key, bucket=self.bucket))
+            episodes.update(lerobot.parse_episodes(tbl, info["video_keys"]))
+        return {"info": info, "tasks": task_map, "episodes": episodes}
+
+    def _meta(self, task: str) -> dict:
+        # Lock across the load so 32 concurrent scan workers don't all fetch the
+        # same task's meta; datasets are static, so a plain per-task memo is enough.
+        with self._meta_lock:
+            m = self._meta_cache.get(task)
+            if m is None:
+                m = self._load_meta(task)
+                self._meta_cache[task] = m
+            return m
+
+    def list_episodes(self, task: str) -> list[str]:
+        return [self._ep_name(i) for i in sorted(self._meta(task)["episodes"])]
+
+    def _row(self, task: str, episode: str) -> tuple[dict, dict]:
+        meta = self._meta(task)
+        row = meta["episodes"].get(self._ep_index(episode))
+        if row is None:
+            raise FileNotFoundError(f"no such episode: {task}/{episode}")
+        return meta, row
+
+    def _data_table(self, task: str, meta: dict, row: dict):
+        """Load the (possibly multi-episode) data parquet for an episode and filter
+        it down to just that episode's rows."""
+        key = meta["info"]["data_path"].format(
+            chunk_index=row["data_chunk"], file_index=row["data_file"])
+        tbl = lerobot.read_table(s3.get_bytes(f"{self._task_root(task)}/{key}", bucket=self.bucket))
+        return lerobot.filter_episode(tbl, row["episode_index"])
+
+    def episode_detail(self, task: str, episode: str) -> dict:
+        meta, row = self._row(task, episode)
+        info = meta["info"]
+        tbl = self._data_table(task, meta, row)
+        robot = lerobot.build_robot(tbl, info)
+        annotations = lerobot.subtasks_to_annotations(tbl)
+        instruction = lerobot.instruction_for(tbl, meta["tasks"], row)
+        cameras = [{"name": c, "has_video": True, "eyes": ["left"]} for c in info["cameras"]]
+        metadata = {"num_annotations": len(annotations)}
+        if info.get("robot_type"):
+            metadata["arm_type"] = info["robot_type"]
+        if info.get("fps"):
+            metadata["control_hz"] = info["fps"]
+        return {
+            "source": self.id, "task": task, "episode": episode,
+            "instruction": instruction, "status": None,
+            "metadata": metadata, "calibration": None,
+            "cameras": cameras, "robot": robot,
+            "annotations": annotations,
+        }
+
+    def video_path(self, task: str, episode: str, camera: str, eye: str) -> Path:
+        meta, row = self._row(task, episode)
+        info = meta["info"]
+        vid = row.get("videos", {}).get(camera)
+        full_key = info["video_keys"].get(camera)
+        if vid is None or full_key is None:
+            raise FileNotFoundError(f"camera {camera!r} not found in {task}/{episode}")
+        vkey = info["video_path"].format(
+            video_key=full_key, chunk_index=vid["chunk"], file_index=vid["file"])
+        s3key = f"{self._task_root(task)}/{vkey}"
+        obj = s3.try_head(s3key, bucket=self.bucket)
+        if obj is None:
+            raise FileNotFoundError(f"video not found: {s3key}")
+        from_ts, to_ts = vid["from_ts"], vid["to_ts"]
+        win = f"{from_ts:.3f}-{'end' if to_ts is None else f'{to_ts:.3f}'}"
+
+        def _produce(dst: Path):
+            # The shared source mp4 is AV1 (not browser-playable) and up to a few
+            # hundred MB. Pull it to a temp file, transcode this episode's window to
+            # H.264, and drop the raw — only the trimmed clip is cached.
+            cache.evict(headroom_gb=min(2.0, obj.size / 1024**3 * 1.5))
+            tmp = cache.path_for(f"lerobot_{obj.etag}_{camera}.src.mp4.tmp{os.getpid()}")
+            try:
+                s3.download(s3key, tmp, bucket=self.bucket)
+                lerobot.transcode(tmp, dst, from_ts, to_ts, info.get("fps"))
+            finally:
+                tmp.unlink(missing_ok=True)
+
+        return cache.get_or_create(f"lerobot_{obj.etag}_{camera}_{win}.mp4", _produce)
+
+    def _safe_stat(self, task, episode):
+        # LeRobot per-episode stats come entirely from the in-memory-cached task
+        # meta, so skip the base class's etag-keyed disk cache (one etag per task
+        # would collide across episodes) — recomputing is already essentially free.
+        try:
+            return self.episode_stat(task, episode)
+        except Exception:
+            return None
+
+    def episode_stat(self, task: str, episode: str) -> dict | None:
+        try:
+            meta, row = self._row(task, episode)
+        except FileNotFoundError:
+            return None
+        info = meta["info"]
+        # Duration from any camera's video window; else from frame count / fps.
+        dur = next((round(v["to_ts"] - v.get("from_ts", 0.0), 3)
+                    for v in row.get("videos", {}).values() if v.get("to_ts") is not None), None)
+        if dur is None and row.get("length") and info.get("fps"):
+            dur = round(row["length"] / info["fps"], 3)
+        return {
+            "task": task, "episode": episode,
+            "duration_s": dur, "robot_frames": row.get("length"),
+            "robot_hz": info.get("fps"), "num_cameras": len(info["cameras"]),
+            "status": None, "station": None, "teacher": None, "control": None,
+            "timestamp": None,
+            "has_annotations": None,  # would require reading each episode's data parquet
+        }
+
+
+class LeRobotSingleRootSource(LeRobotSource):
+    """A LeRobot v3.0 dataset that is a SINGLE dataset at the prefix root
+    (``<prefix>/{meta,data,videos}``), rather than one dataset per ``<prefix>/<task>``
+    subfolder (which the base LeRobotSource assumes).
+
+    Here the dataset's own ``task_index`` / per-episode ``tasks`` label is what we
+    surface as the viewer's "tasks": all meta is loaded ONCE from the root, and its
+    tens of thousands of episodes are grouped by task label so the UI browses
+    task -> episode as usual. All packing/slicing/transcode logic is inherited —
+    only task discovery and path rooting change (every path ignores the task arg
+    and points at the single root)."""
+
+    # ---- everything roots at the prefix, regardless of the task arg ----
+    def _task_root(self, task: str) -> str:
+        return self.prefix
+
+    def _load_all(self) -> dict:
+        # Reuse the base loader against the root (its _task_root("") == prefix),
+        # then index episodes by task label. Cached under a fixed key.
+        meta = super()._load_meta("")
+        by_task: dict[str, list[int]] = {}
+        for idx, row in meta["episodes"].items():
+            tasks = row.get("tasks")
+            label = tasks[0] if isinstance(tasks, (list, tuple)) and tasks else (tasks or "unlabeled")
+            by_task.setdefault(str(label), []).append(idx)
+        for v in by_task.values():
+            v.sort()
+        meta["by_task"] = by_task
+        return meta
+
+    def _meta(self, task: str = "") -> dict:
+        # Single shared meta for the whole dataset (task arg is irrelevant to the
+        # load); memoized under one key so the ~large episodes parquet is read once.
+        with self._meta_lock:
+            m = self._meta_cache.get("__root__")
+            if m is None:
+                m = self._load_all()
+                self._meta_cache["__root__"] = m
+            return m
+
+    def list_tasks(self) -> list[str]:
+        return sorted(self._meta()["by_task"])
+
+    def list_episodes(self, task: str) -> list[str]:
+        idxs = self._meta()["by_task"].get(task, [])
+        # newest-first to match the other sources' ordering
+        return [self._ep_name(i) for i in sorted(idxs, reverse=True)]
+
+    def _row(self, task: str, episode: str) -> tuple[dict, dict]:
+        meta = self._meta()
+        row = meta["episodes"].get(self._ep_index(episode))
+        if row is None:
+            raise FileNotFoundError(f"no such episode: {episode}")
+        return meta, row
+
+
+_KINDS = {"raiden": RaidenSource, "yam": YamMcapSource, "lerobot": LeRobotSource,
+          "lerobot_single": LeRobotSingleRootSource}
 _SOURCES: dict[str, Source] = {}
 
 
