@@ -3,19 +3,19 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Raiden Dataset Viewer</title>
+  <title>YAM Datasets Viewer</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/style.css" />
 </head>
-<body>
+<body class="catalog-mode">
   <aside id="sidebar">
     <div class="brand" id="brand-home" title="Dataset overview">
       <div class="brand-mark"></div>
       <div>
-        <div class="brand-title">Raiden Viewer</div>
-        <div class="brand-sub">raw teleop datasets</div>
+        <div class="brand-title">YAM Datasets</div>
+        <div class="brand-sub">all datasets — click for overview</div>
       </div>
     </div>
 
@@ -44,8 +44,34 @@
   </aside>
 
   <main id="main">
+    <!-- Catalog: the landing page — aggregate stats + one card per dataset -->
+    <div id="catalog-view">
+      <header class="ov-header">
+        <h1>YAM Datasets</h1>
+        <p class="subtle">All datasets available in this viewer — counts, formats, and which carry subtask annotations. Click a dataset to explore its episodes.</p>
+      </header>
+      <div class="cat-agg" id="cat-agg"></div>
+
+      <section class="card cat-chart-card">
+        <div class="card-head">
+          <h3>Compare datasets</h3>
+          <div id="cat-metric-toggle" class="seg">
+            <button data-metric="episodes" class="active">Episodes</button>
+            <button data-metric="hours">Hours</button>
+            <button data-metric="tasks">Tasks</button>
+          </div>
+        </div>
+        <div class="cat-chart-wrap"><canvas id="cat-bar-canvas"></canvas></div>
+      </section>
+
+      <section class="card">
+        <div class="card-head"><h3>Datasets</h3><span id="cat-hint" class="subtle mono"></span></div>
+        <div class="cat-grid" id="cat-grid"></div>
+      </section>
+    </div>
+
     <!-- Overview / landing page: dataset-wide summary -->
-    <div id="overview-view">
+    <div id="overview-view" class="hidden">
       <header class="ov-header">
         <h1>Dataset overview</h1>
         <p class="subtle">Raw Raiden teleop episodes — video, metadata, and robot trajectories.</p>
@@ -113,6 +139,12 @@
             <span id="ep-name" class="crumb mono"></span>
           </div>
         </div>
+        <div class="ep-nav" id="ep-nav">
+          <button id="ep-prev" class="ep-nav-btn" title="Previous episode (←)">◀</button>
+          <input id="ep-slider" class="ep-slider" type="range" min="0" max="0" value="0" step="1" title="Scrub through episodes in this task" />
+          <span id="ep-pos" class="ep-pos mono">0 / 0</span>
+          <button id="ep-next" class="ep-nav-btn" title="Next episode (→)">▶</button>
+        </div>
         <div id="ep-status" class="status-badge"></div>
       </header>
 
@@ -139,6 +171,11 @@
         <section class="card meta-card">
           <div class="card-head"><h3>Metadata</h3></div>
           <div id="meta-grid" class="meta-grid"></div>
+        </section>
+
+        <section class="card rollout-card hidden" id="rollout-card">
+          <div class="card-head"><h3>Rollout / policy</h3><span id="rollout-generator" class="subtle mono"></span></div>
+          <div id="rollout-body" class="rollout-body"></div>
         </section>
 
         <section class="card plot-card">

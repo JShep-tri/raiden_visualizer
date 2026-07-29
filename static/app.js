@@ -60,10 +60,14 @@ async function init() {
     sources.forEach((s) => ssel.appendChild(new Option(s.label, s.id)));
     ssel.onchange = () => selectSource(ssel.value);
 
-    // Hash is #source/task/episode for shareable links.
+    // Hash is #source/task/episode for shareable links. With no (or empty) hash,
+    // land on the catalog gallery instead of jumping into a source.
     const [hSrc, hTask, hEp] = decodeURIComponent(location.hash.slice(1)).split("/");
-    const startSrc = sources.some((s) => s.id === hSrc) ? hSrc : sources[0]?.id;
-    await selectSource(startSrc, hTask || null, hEp || null);
+    if (hSrc && sources.some((s) => s.id === hSrc)) {
+      await selectSource(hSrc, hTask || null, hEp || null);
+    } else {
+      showCatalog();
+    }
   } catch (e) {
     toast("Failed to load sources: " + e.message);
   }
@@ -77,7 +81,29 @@ async function init() {
     if (state.detail) buildCameraGrid(state.detail.cameras || []);  // reload all tiles
   });
   $("#calib-head").addEventListener("click", () => $(".calib-card").classList.toggle("collapsed"));
-  $("#brand-home").addEventListener("click", showOverview);
+  $("#brand-home").addEventListener("click", showCatalog);
+  // Catalog comparison-chart metric toggle (Episodes / Hours / Tasks).
+  $("#cat-metric-toggle").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    document.querySelectorAll("#cat-metric-toggle button").forEach((x) => x.classList.toggle("active", x === b));
+    drawCatalogBars(b.dataset.metric);
+  });
+  // Episode navigation: prev/next buttons, slider scrub, and ←/→ arrow keys.
+  $("#ep-prev").addEventListener("click", () => stepEpisode(-1));
+  $("#ep-next").addEventListener("click", () => stepEpisode(1));
+  $("#ep-slider").addEventListener("input", (ev) => {
+    const ep = state.episodes[parseInt(ev.target.value, 10)];
+    if (ep && ep !== state.episode) selectEpisode(ep);
+  });
+  document.addEventListener("keydown", (ev) => {
+    // Only when viewing an episode, and not while typing in the search/filter inputs.
+    if (state.episode == null) return;
+    const t = ev.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+    if (ev.key === "ArrowLeft") { ev.preventDefault(); stepEpisode(-1); }
+    else if (ev.key === "ArrowRight") { ev.preventDefault(); stepEpisode(1); }
+  });
   $("#play-btn").addEventListener("click", togglePlay);
   $("#scrubber").addEventListener("input", onScrub);
   $("#trace-toggle").addEventListener("click", (ev) => {
@@ -92,6 +118,9 @@ async function init() {
 async function selectSource(sid, autoTask = null, autoEpisode = null) {
   state.source = sid;
   state.episode = null;
+  clearTimeout(state._catTimer);   // stop catalog polling once we enter a source
+  document.body.classList.remove("catalog-mode");  // reveal the episode-browser sidebar
+  $("#catalog-view").classList.add("hidden");
   $("#source-select").value = sid;
   try {
     const { tasks } = await api(`${apiBase()}/tasks`);
@@ -116,9 +145,170 @@ function showOverview() {
   state.episode = null;
   updateHash();
   renderEpisodeList();
+  $("#catalog-view").classList.add("hidden");
   $("#episode-view").classList.add("hidden");
   $("#overview-view").classList.remove("hidden");
   renderOverview();
+}
+
+/* ---------------- Catalog (landing gallery) ---------------- */
+
+function showCatalog() {
+  stopPlayback();
+  state.source = null;
+  state.episode = null;
+  location.hash = "";
+  // Catalog mode: the sidebar's episode-browsing controls (dataset/task/episode
+  // pickers) are meaningless here, so collapse them (CSS keys off this class).
+  document.body.classList.add("catalog-mode");
+  $("#overview-view").classList.add("hidden");
+  $("#episode-view").classList.add("hidden");
+  $("#catalog-view").classList.remove("hidden");
+  renderCatalog();
+}
+
+const CAT_KIND_LABEL = {
+  raiden: "ZED .svo2", yam: "MCAP", lerobot: "LeRobot v3.0",
+  lerobot_single: "LeRobot v3.0",
+};
+
+function annBadge(a) {
+  const map = {
+    yes: ["ann-yes", "✓ annotations"],
+    none: ["ann-none", "no annotations"],
+    unsupported: ["ann-na", "n/a"],
+    unknown: ["ann-na", "annotations ?"],
+  };
+  const [cls, txt] = map[a] || ["ann-na", "annotations ?"];
+  return `<span class="cat-badge ${cls}">${txt}</span>`;
+}
+
+async function renderCatalog() {
+  const grid = $("#cat-grid");
+  const agg = $("#cat-agg");
+  if (!grid.dataset.init) { grid.innerHTML = `<div class="subtle">Loading datasets…</div>`; grid.dataset.init = "1"; }
+  let data;
+  try { data = await api("/api/catalog"); }
+  catch (e) { grid.innerHTML = `<div class="subtle">Failed to load catalog: ${e.message}</div>`; return; }
+  if (state.source) return;  // user navigated away while awaiting
+
+  const a = data.aggregate;
+  agg.innerHTML = [
+    ["Datasets", a.num_datasets],
+    ["Episodes", (a.total_episodes || 0).toLocaleString()],
+    ["Tasks", (a.total_tasks || 0).toLocaleString()],
+    ["Hours", a.total_hours ? a.total_hours.toLocaleString() : "—"],
+    ["With annotations", a.with_annotations],
+  ].map(([k, v]) => `<div class="cat-stat"><div class="cat-stat-v">${v}</div><div class="cat-stat-k">${k}</div></div>`).join("");
+
+  grid.innerHTML = "";
+  data.datasets.forEach((c) => {
+    const card = document.createElement("div");
+    card.className = "cat-card";
+    const fmt = CAT_KIND_LABEL[c.kind] || c.kind || "";
+    const building = c.building;
+    const hours = c.total_hours != null ? `${c.total_hours} h` : (building ? "…" : "—");
+    const cams = (c.cameras && c.cameras.length) ? c.cameras.join(", ") : (building ? "…" : "—");
+    card.innerHTML = `
+      <div class="cat-card-head">
+        <div class="cat-card-title">${c.label}</div>
+        <span class="cat-fmt">${fmt}</span>
+      </div>
+      <div class="cat-metrics">
+        <div><b>${(c.num_episodes ?? "—").toLocaleString?.() ?? c.num_episodes ?? "—"}</b><span>episodes</span></div>
+        <div><b>${c.num_tasks ?? "—"}</b><span>tasks</span></div>
+        <div><b>${hours}</b><span>duration</span></div>
+      </div>
+      <div class="cat-row">${building ? '<span class="cat-badge building">⟳ computing…</span>' : annBadge(c.annotations)}</div>
+      <div class="cat-cams subtle mono">${cams}</div>
+      <div class="cat-prefix subtle mono">s3://${c.bucket}/${c.prefix}</div>`;
+    card.addEventListener("click", () => selectSource(c.id));
+    grid.appendChild(card);
+  });
+
+  // Stash the cards for the comparison bar chart (redrawn on metric toggle / resize).
+  state.catalog = data.datasets;
+  drawCatalogBars(state.catMetric || "episodes");
+
+  $("#cat-hint").textContent = a.building ? `${a.building} computing…` : `${a.num_datasets} datasets`;
+  // Poll while any dataset's deep summary is still building.
+  if (a.building > 0 && !state.source) {
+    clearTimeout(state._catTimer);
+    state._catTimer = setTimeout(() => { if (!state.source) renderCatalog(); }, 4000);
+  }
+}
+
+// Horizontal bar chart comparing datasets by a chosen metric. Matches the app's
+// existing canvas charts (setupCanvas/niceTicks, #6ea8fe bars, mono tick labels).
+const CAT_METRICS = {
+  episodes: { key: "num_episodes", label: "episodes", fmt: (v) => v.toLocaleString() },
+  hours: { key: "total_hours", label: "hours", fmt: (v) => (v >= 100 ? Math.round(v) : v.toFixed(1)) },
+  tasks: { key: "num_tasks", label: "tasks", fmt: (v) => String(v) },
+};
+
+function drawCatalogBars(metric) {
+  state.catMetric = metric;
+  const canvas = $("#cat-bar-canvas");
+  if (!canvas || !state.catalog) return;
+  const m = CAT_METRICS[metric] || CAT_METRICS.episodes;
+  // Rows for datasets that have this metric (skip still-building/absent values).
+  const rows = state.catalog
+    .map((c) => ({ label: c.label, v: c[m.key] }))
+    .filter((r) => typeof r.v === "number" && r.v > 0)
+    .sort((a, b) => b.v - a.v);
+  // Size the canvas: fixed row height so the card grows with dataset count.
+  const rowH = 30, padTop = 8, padBot = 26;
+  canvas.style.height = (rows.length * rowH + padTop + padBot) + "px";
+  const { ctx, W, H } = setupCanvas("cat-bar-canvas");
+  if (!rows.length) {
+    ctx.fillStyle = "#626875"; ctx.font = "12px 'Inter', sans-serif"; ctx.textAlign = "left";
+    ctx.fillText("computing…", 8, 20);
+    return;
+  }
+  const maxV = Math.max(...rows.map((r) => r.v));
+  const labelW = 168, valW = 92;
+  const x0 = labelW, plotW = W - labelW - valW;
+  // x gridlines + axis ticks. IMPORTANT: the axis max must be >= maxV, else the
+  // largest bar (scaled by v/tickMax) overshoots past the plot area. niceTicks
+  // stops at the last tick <= maxV, so extend it by one step to a nice ceiling.
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  let ticks = niceTicks(0, maxV, 4);
+  const step = ticks.length > 1 ? ticks[1] - ticks[0] : (maxV || 1);
+  let tickMax = ticks[ticks.length - 1] || maxV;
+  while (tickMax < maxV) { tickMax += step; ticks.push(tickMax); }
+  ticks.forEach((v) => {
+    const x = x0 + plotW * (v / tickMax);
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.beginPath(); ctx.moveTo(x, padTop); ctx.lineTo(x, H - padBot + 4); ctx.stroke();
+    ctx.fillStyle = "#626875"; ctx.textAlign = "center";
+    ctx.fillText(m.fmt(v), x, H - padBot + 18);
+  });
+  // bars + labels
+  rows.forEach((r, i) => {
+    const y = padTop + i * rowH;
+    const bh = rowH - 10;
+    const bw = Math.max(2, plotW * (r.v / tickMax));
+    // dataset label (right-aligned, truncated by clip)
+    ctx.fillStyle = "#e7e9ee"; ctx.font = "12px 'Inter', sans-serif"; ctx.textAlign = "right";
+    ctx.fillText(r.label.length > 24 ? r.label.slice(0, 23) + "…" : r.label, labelW - 12, y + bh / 2 + 4);
+    // bar
+    ctx.fillStyle = "#6ea8fe";
+    roundRect(ctx, x0, y + 2, bw, bh, 3); ctx.fill();
+    // value at bar end
+    ctx.fillStyle = "#9aa0ad"; ctx.font = "11px 'JetBrains Mono', monospace"; ctx.textAlign = "left";
+    ctx.fillText(m.fmt(r.v), x0 + bw + 6, y + bh / 2 + 4);
+  });
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, h / 2, w / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
 }
 
 async function renderOverview() {
@@ -312,6 +502,8 @@ const FILTER_FACETS = [
   { field: "duration_s", label: "Duration (s)", kind: "range", get: (e) => e.duration_s },
   { field: "status", label: "Status", kind: "enum", get: (e) => e.status },
   { field: "station", label: "Station", kind: "enum", get: (e) => e.station },
+  { field: "teacher", label: "Robot teacher", kind: "enum", get: (e) => e.teacher },
+  { field: "control", label: "Control type", kind: "enum", get: (e) => e.control },
   { field: "num_cameras", label: "Cameras", kind: "range", get: (e) => e.num_cameras, int: true },
   { field: "robot_frames", label: "Robot frames", kind: "range", get: (e) => e.robot_frames, int: true },
   { field: "has_annotations", label: "Annotations", kind: "bool", get: (e) => e.has_annotations },
@@ -660,15 +852,18 @@ function renderEpisodeList() {
   const filter = $("#episode-search").value.toLowerCase();
   const list = $("#episode-list");
   list.innerHTML = "";
-  const matched = state.episodes.filter((e) => e.toLowerCase().includes(filter));
+  // Index is the episode's stable position in the task list (newest = #1), so it
+  // doesn't renumber as the search box narrows the visible rows.
+  const matched = state.episodes
+    .map((ep, i) => ({ ep, idx: i + 1 }))
+    .filter(({ ep }) => ep.toLowerCase().includes(filter));
   const shown = matched.slice(0, EPISODE_RENDER_CAP);
   $("#episode-count").textContent = matched.length;
-  shown.forEach((ep) => {
+  shown.forEach(({ ep, idx }) => {
     const li = el("li");
     li.classList.toggle("active", ep === state.episode);
-    const parts = parseEpisodeName(ep);
-    li.appendChild(el("div", "ep-li-name", parts.name));
-    if (parts.when) li.appendChild(el("div", "ep-li-meta", parts.when));
+    // Simplified sidebar: just the index — no station, no timestamp.
+    li.appendChild(el("div", "ep-li-idx mono", `#${idx}`));
     li.onclick = () => selectEpisode(ep);
     list.appendChild(li);
   });
@@ -696,6 +891,7 @@ async function selectEpisode(ep) {
   state.episode = ep;
   updateHash();
   renderEpisodeList();
+  updateEpisodeNav();
   $("#overview-view").classList.add("hidden");
   $("#episode-view").classList.remove("hidden");
   $("#ep-instruction").textContent = "Loading…";
@@ -709,6 +905,42 @@ async function selectEpisode(ep) {
     toast("Failed to load episode: " + e.message);
     $("#ep-instruction").textContent = "Error loading episode";
   }
+}
+
+/* ---------------- Episode navigation: slider + prev/next + arrow keys ---------- */
+
+// Sync the header nav bar (slider position, counter, button disabled state) to the
+// current episode's index within the task list.
+function updateEpisodeNav() {
+  const eps = state.episodes;
+  const i = eps.indexOf(state.episode);
+  const n = eps.length;
+  const slider = $("#ep-slider");
+  const pos = $("#ep-pos");
+  const prev = $("#ep-prev");
+  const next = $("#ep-next");
+  if (i < 0 || !n) {
+    pos.textContent = "0 / 0";
+    slider.max = "0"; slider.value = "0"; slider.disabled = true;
+    prev.disabled = next.disabled = true;
+    return;
+  }
+  slider.disabled = false;
+  slider.max = String(n - 1);
+  // Slider left→right = first→last in the task list (which is newest→oldest).
+  slider.value = String(i);
+  pos.textContent = `${i + 1} / ${n}`;
+  prev.disabled = i === 0;
+  next.disabled = i === n - 1;
+}
+
+// Step to the episode `delta` positions away in the task list (bounded).
+function stepEpisode(delta) {
+  const eps = state.episodes;
+  const i = eps.indexOf(state.episode);
+  if (i < 0) return;
+  const j = Math.min(eps.length - 1, Math.max(0, i + delta));
+  if (j !== i) selectEpisode(eps[j]);
 }
 
 function renderDetail(d) {
@@ -740,6 +972,7 @@ function renderDetail(d) {
 
   buildCameraGrid(d.cameras || []);
   renderMeta(md, d);
+  renderRollout(md);
   renderPlots(d.robot);
   renderCalibration(d.calibration, d.cameras || []);
   renderAnnotations(d.annotations || []);
@@ -1057,6 +1290,50 @@ function renderMeta(md, d) {
     shown++;
   });
   if (!shown) notAvailable(grid, "No metadata available for this episode.");
+}
+
+// Rollout / policy provenance. Only rfm_rl rollout episodes carry
+// metadata.rollout_info; when it is absent the whole card is hidden (data-driven,
+// not an empty-state note) since it is not a universal section. Reuses the
+// Metadata row styling; the long checkpoint path is a full-width wrapping row.
+function renderRollout(md) {
+  const card = $("#rollout-card");
+  const ri = md && md.rollout_info;
+  if (!ri || typeof ri !== "object") { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  $("#rollout-generator").textContent = md.generator || "";
+  const body = $("#rollout-body");
+  body.innerHTML = "";
+  const rows = [
+    ["Policy", ri.policy, false],
+    ["Config", ri.config_name, true],
+    ["Action space", ri.action_space, false],
+    ["Control rate", ri.control_hz != null ? `${ri.control_hz} Hz` : null, false],
+    ["Ticks requested", ri.n_ticks_requested, false],
+    ["Actor / tick", ri.actor_per_tick, false],
+    ["Ensemble coeff", ri.ensemble_coeff, false],
+    ["Max joint delta", ri.max_joint_delta, false],
+    ["Verdict", ri.verdict, false],
+    ["GT episode", ri.gt_episode, false],
+    ["Git commit", ri.git_commit ? String(ri.git_commit).slice(0, 10) : null, true],
+  ];
+  let shown = 0;
+  rows.forEach(([k, val, mono]) => {
+    if (val == null || val === "") return;
+    const row = el("div", "meta-row");
+    row.appendChild(el("div", "meta-key", k));
+    row.appendChild(el("div", "meta-val" + (mono ? " mono" : ""), String(val)));
+    body.appendChild(row);
+    shown++;
+  });
+  if (ri.ckpt) {
+    const row = el("div", "meta-row rollout-ckpt");
+    row.appendChild(el("div", "meta-key", "Checkpoint"));
+    row.appendChild(el("div", "meta-val mono", String(ri.ckpt)));
+    body.appendChild(row);
+    shown++;
+  }
+  if (!shown) notAvailable(body, "No rollout parameters recorded for this episode.");
 }
 
 // Subtask annotations (timestamped). The card is always shown; when an episode

@@ -10,11 +10,12 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import config, sources
+from . import catalog, config, sources
 
-app = FastAPI(title="Raiden Dataset Viewer", version="0.2.0")
+app = FastAPI(title="YAM Datasets Viewer", version="0.3.0")
 
 _STATIC = Path(__file__).resolve().parent.parent / "static"
+_CATALOG = catalog.CatalogBuilder()
 
 
 def _src(sid: str):
@@ -36,6 +37,50 @@ def list_sources():
 @app.get("/api/health")
 def health():
     return {"ok": True, "sources": [s["id"] for s in config.SOURCES]}
+
+
+@app.get("/api/catalog")
+def get_catalog():
+    """Landing-page data: one summary card per readable dataset + cross-dataset
+    aggregates. NEVER computes inline (even task/episode counts hit S3 hard across
+    227k+ episodes) — it serves cards from the on-disk cache and kicks off any
+    missing/stale ones in the background. An uncached card returns building=true
+    with just id/label/kind; the frontend polls until every card is ready. This
+    keeps the landing page instant regardless of dataset size."""
+    available = sources.get_sources(config.SOURCES)
+    cards = []
+    for spec in config.SOURCES:
+        if spec["id"] not in available:
+            continue  # access-gated + unreadable here
+        src = available[spec["id"]]
+        card = _CATALOG.get_card(spec["id"])
+        if card is not None and not card.get("building"):
+            # Overlay the LIVE label/kind from config so a rename shows immediately
+            # without wiping the (label-frozen) deep-summary cache.
+            cards.append({**card, "label": spec["label"], "kind": spec["kind"]})
+        else:
+            _CATALOG.start_deep(spec["id"], src)    # (re)build in background
+            # serve the phase-1 card if we have it (counts), else a bare stub
+            base = card or {"id": spec["id"], "building": True}
+            cards.append({**base, "label": spec["label"], "kind": spec["kind"]})
+    agg = {
+        "num_datasets": len(cards),
+        "total_episodes": sum(c.get("num_episodes") or 0 for c in cards),
+        "total_tasks": sum(c.get("num_tasks") or 0 for c in cards),
+        "total_hours": round(sum(c.get("total_hours") or 0 for c in cards), 1),
+        "with_annotations": sum(1 for c in cards if c.get("annotations") == "yes"),
+        "building": sum(1 for c in cards if c.get("building")),
+    }
+    return {"aggregate": agg, "datasets": cards, "region": config.AWS_REGION}
+
+
+@app.post("/api/catalog/{sid}/rebuild")
+def rebuild_catalog(sid: str):
+    """Force a rebuild of one dataset's deep summary (invalidates cache, re-scans)."""
+    src = _src(sid)
+    _CATALOG.invalidate(sid)
+    _CATALOG.start_deep(sid, src, force=True)
+    return {"ok": True, "building": True}
 
 
 @app.get("/api/sources/{sid}/overview")

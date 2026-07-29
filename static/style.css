@@ -47,6 +47,12 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
   padding: 18px 16px;
   gap: 16px;
 }
+
+/* Catalog landing: the episode-browser controls don't apply, so hide them and
+   leave just the brand. Selecting a dataset removes .catalog-mode and they return. */
+body.catalog-mode #sidebar .search-wrap,
+body.catalog-mode #sidebar .side-section,
+body.catalog-mode #sidebar .side-foot { display: none; }
 .brand { display: flex; align-items: center; gap: 12px; }
 .brand-mark {
   width: 34px; height: 34px; border-radius: 9px;
@@ -95,9 +101,8 @@ select:focus { border-color: var(--accent); }
   background: var(--accent-soft); color: var(--text);
   border-color: rgba(110,168,254,0.35);
 }
-#episode-list li .ep-li-name { font-family: 'JetBrains Mono', monospace; font-size: 11.5px; }
-#episode-list li .ep-li-meta { font-size: 10.5px; color: var(--text-faint); margin-top: 2px; }
-#episode-list li.active .ep-li-meta { color: var(--accent); }
+#episode-list li .ep-li-idx { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-dim); }
+#episode-list li.active .ep-li-idx { color: var(--text); }
 #episode-list li.ep-li-more { color: var(--text-faint); font-style: italic; cursor: default; text-align: center; }
 
 .side-foot { font-size: 10.5px; color: var(--text-faint); border-top: 1px solid var(--border-soft); padding-top: 10px; }
@@ -107,6 +112,7 @@ select:focus { border-color: var(--accent); }
 
 /* Overview / landing page */
 #overview-view { padding: 26px 30px 60px; max-width: 1100px; margin: 0 auto; }
+#catalog-view { padding: 26px 30px 60px; max-width: 1240px; margin: 0 auto; }
 .ov-header { margin-bottom: 22px; }
 .ov-header h1 { font-size: 24px; letter-spacing: -0.02em; }
 .ov-header p { margin: 6px 0 0; }
@@ -150,7 +156,8 @@ select:focus { border-color: var(--accent); }
 .ov-task-row .t-bar i { display: block; height: 100%; background: linear-gradient(90deg,#6ea8fe,#a78bfa); }
 .ov-task-row .t-latest { font-size: 11px; color: var(--text-faint); font-family: 'JetBrains Mono', monospace; min-width: 92px; text-align: right; }
 
-#episode-view { padding: 26px 30px 60px; max-width: 1400px; margin: 0 auto; }
+/* Extra bottom padding so the last card clears the floating .ep-nav pill. */
+#episode-view { padding: 26px 30px 96px; max-width: 1400px; margin: 0 auto; }
 
 #ep-header {
   display: flex; justify-content: space-between; align-items: flex-start;
@@ -170,6 +177,38 @@ select:focus { border-color: var(--accent); }
 .status-badge.failure, .status-badge.fail { background: rgba(248,113,113,0.12); color: var(--bad); border-color: rgba(248,113,113,0.3); }
 .status-badge.neutral { background: var(--bg-hover); color: var(--text-dim); }
 
+/* Episode navigation (slider + prev/next): a floating pill pinned to the bottom
+   center of the content area. position:fixed keeps it in place while #main scrolls,
+   and since it lives inside #episode-view it auto-hides on the overview. Centered
+   over the content by offsetting half the 300px sidebar (150px). */
+.ep-nav {
+  position: fixed; bottom: 22px; left: calc(50% + 150px); transform: translateX(-50%);
+  z-index: 50; display: flex; align-items: center; gap: 10px;
+  width: 380px; max-width: calc(100vw - 340px);
+  padding: 9px 14px; border-radius: 999px;
+  background: var(--bg-elev); border: 1px solid var(--border); box-shadow: var(--shadow);
+}
+.ep-nav-btn {
+  flex: none; width: 28px; height: 28px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text-dim);
+  cursor: pointer; font-size: 11px; line-height: 1; transition: background 0.12s, color 0.12s;
+}
+.ep-nav-btn:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+.ep-nav-btn:disabled { opacity: 0.35; cursor: default; }
+.ep-slider {
+  flex: 1; -webkit-appearance: none; appearance: none; height: 4px; border-radius: 3px;
+  background: var(--border); outline: none; cursor: pointer;
+}
+.ep-slider:disabled { cursor: default; opacity: 0.5; }
+.ep-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none; width: 13px; height: 13px; border-radius: 50%;
+  background: var(--accent); cursor: pointer; box-shadow: 0 0 0 3px rgba(110,168,254,0.2);
+}
+.ep-slider::-moz-range-thumb {
+  width: 13px; height: 13px; border: none; border-radius: 50%; background: var(--accent); cursor: pointer;
+}
+.ep-pos { flex: none; font-size: 11.5px; color: var(--text-dim); min-width: 66px; text-align: center; white-space: nowrap; }
+
 .content-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
@@ -180,11 +219,12 @@ select:focus { border-color: var(--accent); }
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
 }
-.video-card { grid-column: 1; grid-row: 1; }
-.meta-card  { grid-column: 2; grid-row: 1; }
-.plot-card  { grid-column: 1 / -1; grid-row: 2; }
-.annotations-card { grid-column: 1 / -1; grid-row: 3; }
-.calib-card { grid-column: 1 / -1; grid-row: 4; }
+.video-card { grid-column: 1; }
+.meta-card  { grid-column: 2; }
+/* Full-width cards flow in DOM order after the video/metadata row. The rollout
+   card (rfm_rl rollouts only) is hidden when absent, and auto-flow closes the
+   gap for us -- no explicit rows to renumber. */
+.rollout-card, .plot-card, .annotations-card, .calib-card { grid-column: 1 / -1; }
 
 .annotations-body { padding: 8px 16px 14px; display: flex; flex-direction: column; gap: 2px; }
 .ann-row { display: flex; gap: 14px; padding: 7px 0; border-bottom: 1px solid var(--border-soft); font-size: 13px; }
@@ -296,6 +336,13 @@ select:focus { border-color: var(--accent); }
 .meta-val { color: var(--text); text-align: right; font-weight: 500; }
 .meta-val.mono { font-family: 'JetBrains Mono', monospace; font-size: 12px; }
 
+/* Rollout / policy card: reuses the metadata row styling in a responsive
+   multi-column grid. The checkpoint path spans full width and wraps. */
+.rollout-body { padding: 6px 16px 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 0 28px; }
+.rollout-body .meta-val { min-width: 0; overflow-wrap: anywhere; }
+.rollout-ckpt { grid-column: 1 / -1; }
+.rollout-ckpt .meta-val { text-align: left; }
+
 /* Plots */
 #plots { padding: 14px 16px 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
 .plot-block { display: flex; flex-direction: column; gap: 8px; }
@@ -342,9 +389,7 @@ select:focus { border-color: var(--accent); }
 
 @media (max-width: 980px) {
   .content-grid { grid-template-columns: 1fr; }
-  .video-card, .meta-card, .plot-card, .annotations-card, .calib-card { grid-column: 1; }
-  .video-card { grid-row: 1; } .meta-card { grid-row: 2; }
-  .plot-card { grid-row: 3; } .annotations-card { grid-row: 4; } .calib-card { grid-row: 5; }
+  .video-card, .meta-card, .rollout-card, .plot-card, .annotations-card, .calib-card { grid-column: 1; }
 }
 
 /* ---------- Episode filter (overview) ---------- */
@@ -398,3 +443,34 @@ select:focus { border-color: var(--accent); }
 .fr-tag.failure, .fr-tag.fail { background: rgba(248,113,113,0.12); color: var(--bad); border-color: rgba(248,113,113,0.3); }
 .fr-tag.ann { background: rgba(110,168,254,0.10); color: var(--accent); border-color: rgba(110,168,254,0.28); }
 .fr-more { padding: 8px 12px; font-size: 12px; }
+
+/* ---------------- Catalog (landing gallery) ---------------- */
+.cat-agg { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.cat-chart-card { margin-bottom: 24px; }
+.cat-chart-wrap { width: 100%; margin-top: 6px; }
+.cat-chart-wrap canvas { width: 100%; display: block; }
+.cat-stat { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px 18px; box-shadow: var(--shadow); }
+.cat-stat-v { font-size: 26px; font-weight: 700; color: var(--text); line-height: 1.1; }
+.cat-stat-k { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+
+.cat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; padding-top: 4px; }
+.cat-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px; cursor: pointer; transition: border-color .12s, background .12s, transform .12s; }
+.cat-card:hover { border-color: var(--accent); background: var(--bg-hover); transform: translateY(-2px); }
+.cat-card-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.cat-card-title { font-size: 15px; font-weight: 600; color: var(--text); }
+.cat-fmt { font-size: 11px; color: var(--text-dim); background: var(--bg-elev); border: 1px solid var(--border);
+  padding: 2px 8px; border-radius: 20px; white-space: nowrap; }
+.cat-metrics { display: flex; gap: 18px; margin-bottom: 12px; }
+.cat-metrics > div { display: flex; flex-direction: column; }
+.cat-metrics b { font-size: 18px; font-weight: 700; color: var(--text); }
+.cat-metrics span { font-size: 11px; color: var(--text-dim); }
+.cat-row { margin-bottom: 8px; }
+.cat-badge { font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 500; }
+.cat-badge.ann-yes { background: rgba(74,222,128,0.14); color: var(--good); }
+.cat-badge.ann-none { background: var(--bg-elev); color: var(--text-dim); border: 1px solid var(--border); }
+.cat-badge.ann-na { background: var(--bg-elev); color: var(--text-faint); border: 1px solid var(--border-soft); }
+.cat-badge.building { background: var(--accent-soft); color: var(--accent); }
+.cat-cams { font-size: 11px; margin-bottom: 6px; }
+.cat-prefix { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
