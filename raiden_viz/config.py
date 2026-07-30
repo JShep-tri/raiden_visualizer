@@ -47,12 +47,13 @@ SOURCES = [
      # ships alongside the MCAPs under this prefix, keyed by the episode uuid. The
      # MCAP carries no intrinsics, so this is the only calibration for xdof.
      "metadata_prefix": "metadata_202507"},
-    # The public YAM bimanual dataset: a set of LeRobot v3.0 datasets (one per task
-    # folder under this prefix). Packed parquet timeseries + AV1 video, handled by
-    # the lerobot adapter. Each task's episode instructions + subtask labels come
-    # from the parquet, so no sidecar is needed.
-    {"id": "yam_bimanual", "label": "YAM Bimanual (public)", "kind": "lerobot",
-     "bucket": S3_BUCKET, "prefix": "yam_public/bimanual-dataset"},
+    # WorldEngine: the public YAM dataset — a set of LeRobot v3.0 datasets (one per
+    # task folder under this prefix). Packed parquet timeseries + AV1 video, handled
+    # by the lerobot adapter. Each task's episode instructions + subtask labels come
+    # from the parquet, so no sidecar is needed. (Formerly at yam_public/bimanual-dataset
+    # with id yam_bimanual; renamed + relocated to yam_public/WorldEngine 2026-07.)
+    {"id": "worldengine", "label": "WorldEngine", "kind": "lerobot",
+     "bucket": S3_BUCKET, "prefix": "yam_public/WorldEngine"},
     # MolmoAct2 bimanual YAM: a SINGLE LeRobot v3.0 dataset at the prefix root
     # (meta/data/videos directly under it, no per-task subfolders), ~32k episodes
     # across 34 internal tasks. Handled by the single-root lerobot adapter, which

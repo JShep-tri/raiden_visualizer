@@ -22,7 +22,7 @@ a one-line config entry.
 | `rollouts` | Raiden Rollouts | ZED `.svo2` | raiden layout + `rollout_info` in metadata (policy rollouts) |
 | `abc130k` | ABC-130k (train) | MCAP | `<prefix>/<task>/<episode>/episode.mcap` |
 | `abc130k_val` | ABC-130k (val) | MCAP | ABC-130k val split |
-| `yam_bimanual` | YAM Bimanual (public) | LeRobot v3.0 | `<prefix>/<task>/{meta,data,videos}` (one dataset per task folder) |
+| `worldengine` | WorldEngine | LeRobot v3.0 | `<prefix>/<task>/{meta,data,videos}` (one dataset per task folder) |
 | `molmoact2_yam` | MolmoAct2 Bimanual YAM | LeRobot v3.0 | `<prefix>/{meta,data,videos}` (single dataset, grouped by internal task) |
 
 Four adapter kinds cover these:
