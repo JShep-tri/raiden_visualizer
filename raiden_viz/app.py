@@ -115,6 +115,10 @@ def get_contrib():
             "id": spec["id"], "label": spec["label"], "kind": roll.get("kind"),
             "counts_episodes": roll.get("counts_episodes", False),
             "totals": t, "span": roll.get("span"), "built_ok": roll.get("built_ok", True),
+            # Per-dataset day rollup so the frontend can re-merge for any subset
+            # (e.g. "just raiden") with no extra request. Rollups are tiny (one row
+            # per active day), so shipping them all is cheap.
+            "days": roll.get("days") or {},
         })
         for day, v in (roll.get("days") or {}).items():
             m = merged.setdefault(day, {"files": 0, "bytes": 0, "episodes": 0})

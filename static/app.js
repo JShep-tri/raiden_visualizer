@@ -343,6 +343,7 @@ async function loadContrib() {
   catch (e) { return; }               // calendar is non-critical; leave silent on error
   if (state.source) return;           // navigated into a source meanwhile
   state.contrib = data;
+  renderContribFilter();
   drawContrib(state.contribMetric || "bytes");
   if (data.building > 0 && !state.source) {
     clearTimeout(state._contribTimer);
@@ -350,25 +351,73 @@ async function loadContrib() {
   }
 }
 
+// Dataset-subset chips above the calendar: "All" + one per built dataset. Clicking
+// one scopes the graph to that dataset's uploads (re-merged client-side, no fetch).
+function renderContribFilter() {
+  const host = $("#contrib-filter");
+  const data = state.contrib;
+  if (!host || !data) return;
+  const built = (data.datasets || []).filter((d) => !d.building && d.built_ok !== false);
+  // "All" + each dataset, with an upload-day count as a hint.
+  const cur = state.contribFilter || "all";
+  const chips = [{ id: "all", label: "All datasets", n: (data.totals || {}).days_active }]
+    .concat(built.map((d) => ({ id: d.id, label: d.label, n: Object.keys(d.days || {}).length })));
+  host.innerHTML = chips.map((c) =>
+    `<button class="contrib-chip ${c.id === cur ? "active" : ""}" data-cid="${c.id}">` +
+    `${c.label}<span class="cc-n">${c.n != null ? c.n + "d" : ""}</span></button>`
+  ).join("");
+  // Bind once; delegate clicks.
+  if (!host.dataset.bound) {
+    host.dataset.bound = "1";
+    host.addEventListener("click", (ev) => {
+      const b = ev.target.closest(".contrib-chip");
+      if (!b) return;
+      state.contribFilter = b.dataset.cid;
+      renderContribFilter();
+      drawContrib(state.contribMetric || "bytes");
+    });
+  }
+}
+
+// Resolve the calendar view for the current dataset-subset filter: returns the
+// day-rollup + span + totals for either everything (merged, filter="all") or one
+// dataset. Keeps drawContrib agnostic to whether it's showing all or a subset.
+function contribView() {
+  const data = state.contrib || {};
+  const f = state.contribFilter || "all";
+  if (f === "all") {
+    return { days: data.days || {}, span: data.span || {}, totals: data.totals || {},
+             counts_episodes: true, building: data.building || 0, label: "all datasets" };
+  }
+  const ds = (data.datasets || []).find((d) => d.id === f);
+  if (!ds || ds.building) return { days: {}, span: {}, totals: {}, counts_episodes: true, building: 1, label: f };
+  const dk = Object.keys(ds.days || {}).sort();
+  return {
+    days: ds.days || {}, span: ds.span || {},
+    totals: { ...(ds.totals || {}), days_active: dk.length },
+    counts_episodes: ds.counts_episodes !== false, building: 0, label: ds.label,
+  };
+}
+
 // Render the year-of-weeks heatmap into #contrib-cal for a chosen metric.
 function drawContrib(metric) {
   state.contribMetric = metric;
   const host = $("#contrib-cal");
-  const data = state.contrib;
-  if (!host || !data) return;
+  if (!host || !state.contrib) return;
+  const view = contribView();       // all-datasets or a single-dataset subset
   const m = CONTRIB_METRICS[metric] || CONTRIB_METRICS.bytes;
 
-  const first = data.span && data.span.first, last = data.span && data.span.last;
+  const first = view.span && view.span.first, last = view.span && view.span.last;
   if (!first || !last) {
-    host.innerHTML = `<div class="contrib-empty">${data.building ? "Scanning uploads…" : "No dated uploads found."}</div>`;
-    $("#contrib-summary").textContent = data.building ? `${data.building} scanning…` : "";
+    host.innerHTML = `<div class="contrib-empty">${view.building ? "Scanning uploads…" : "No dated uploads found."}</div>`;
+    $("#contrib-summary").textContent = view.building ? `${view.building} scanning…` : "";
     return;
   }
 
   // Build the day grid from the Sunday on/before `first` to the Saturday on/after
   // `last`, laid out as columns of weeks (GitHub style). Dates are handled in UTC
   // to match S3's LastModified day bucketing (avoids TZ off-by-one at week edges).
-  const val = (day) => { const d = data.days[day]; return d ? (d[m.key] || 0) : 0; };
+  const val = (day) => { const d = view.days[day]; return d ? (d[m.key] || 0) : 0; };
   const parse = (s) => new Date(s + "T00:00:00Z");
   const iso = (dt) => dt.toISOString().slice(0, 10);
   const start = parse(first); start.setUTCDate(start.getUTCDate() - start.getUTCDay());  // back to Sunday
@@ -425,15 +474,26 @@ function drawContrib(metric) {
     `<div class="contrib-months">${monthRow}</div>` +
     `<div class="contrib-body"><div class="contrib-dow">${dow}</div><div class="contrib-weeks">${cells}</div></div>`;
 
-  const t = data.totals || {};
+  const t = view.totals || {};
   const totalForMetric = m.key === "bytes" ? fmtBytes(t.bytes) :
     (m.key === "episodes" ? (t.episodes || 0).toLocaleString() : (t.files || 0).toLocaleString());
-  const notEp = m.key === "episodes" && data.datasets
-    ? data.datasets.filter((d) => d.built_ok !== false && d.counts_episodes === false).length : 0;
+  // Episode-count caveat: for "all", count packed datasets that aren't episode-
+  // counted; for a single dataset, flag it directly if it's a packed format.
+  const f = state.contribFilter || "all";
+  let notEpNote = "";
+  if (m.key === "episodes") {
+    if (f === "all") {
+      const n = (state.contrib.datasets || [])
+        .filter((d) => d.built_ok !== false && d.counts_episodes === false).length;
+      if (n) notEpNote = ` · ${n} packed dataset(s) not episode-counted`;
+    } else if (!view.counts_episodes) {
+      notEpNote = ` · packed format — episodes not counted (see Data/Files)`;
+    }
+  }
+  const scope = f === "all" ? "" : ` — ${view.label}`;
   $("#contrib-summary").textContent =
-    `${totalForMetric} ${m.label} across ${t.days_active || 0} active days` +
-    (data.building ? ` · ${data.building} scanning…` : "") +
-    (notEp ? ` · ${notEp} packed dataset(s) not episode-counted` : "");
+    `${totalForMetric} ${m.label}${scope} across ${t.days_active || 0} active days` +
+    (view.building ? ` · scanning…` : "") + notEpNote;
 }
 
 async function renderOverview() {

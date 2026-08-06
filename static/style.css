@@ -476,7 +476,26 @@ select:focus { border-color: var(--accent); }
 .cat-prefix { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------- Upload contribution calendar (GitHub-style) ---------- */
+.contrib-card { margin-bottom: 24px; }
 .contrib-wrap { padding: 4px 2px 2px; }
+/* Dataset-subset filter (chips above the calendar). */
+.contrib-filter {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  padding: 0 2px 12px;
+}
+.contrib-chip {
+  padding: 3px 10px; border-radius: 999px; cursor: pointer;
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--text-dim); font-size: 11.5px; line-height: 1.4;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.contrib-chip:hover { background: var(--bg-hover); color: var(--text); }
+.contrib-chip.active {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--accent);
+}
+.contrib-chip .cc-n { color: var(--text-faint); margin-left: 5px; }
+.contrib-chip.active .cc-n { color: var(--accent); }
 .contrib-cal { overflow-x: auto; padding-bottom: 6px; }
 /* One month-labeled column group of 7-day weeks. The grid is built in JS as a
    flex row of week-columns; each week is a vertical stack of 7 day cells. */
