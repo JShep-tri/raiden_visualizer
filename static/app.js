@@ -89,6 +89,13 @@ async function init() {
     document.querySelectorAll("#cat-metric-toggle button").forEach((x) => x.classList.toggle("active", x === b));
     drawCatalogBars(b.dataset.metric);
   });
+  // Upload contribution-calendar metric toggle (Data / Episodes / Files).
+  $("#contrib-metric-toggle").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    document.querySelectorAll("#contrib-metric-toggle button").forEach((x) => x.classList.toggle("active", x === b));
+    drawContrib(b.dataset.metric);
+  });
   // Episode navigation: prev/next buttons, slider scrub, and ←/→ arrow keys.
   $("#ep-prev").addEventListener("click", () => stepEpisode(-1));
   $("#ep-next").addEventListener("click", () => stepEpisode(1));
@@ -229,6 +236,7 @@ async function renderCatalog() {
   // Stash the cards for the comparison bar chart (redrawn on metric toggle / resize).
   state.catalog = data.datasets;
   drawCatalogBars(state.catMetric || "episodes");
+  loadContrib();  // upload-activity calendar (independent /api/contrib scan)
 
   $("#cat-hint").textContent = a.building ? `${a.building} computing…` : `${a.num_datasets} datasets`;
   // Poll while any dataset's deep summary is still building.
@@ -309,6 +317,123 @@ function roundRect(ctx, x, y, w, h, r) {
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
+}
+
+/* ---------------- Upload contribution calendar (GitHub-style) ---------------- */
+// Human-readable bytes for the "Data" metric + tooltips.
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let i = 0, v = n;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+}
+
+const CONTRIB_METRICS = {
+  bytes: { key: "bytes", label: "uploaded", fmt: fmtBytes },
+  episodes: { key: "episodes", label: "episodes", fmt: (v) => v.toLocaleString() },
+  files: { key: "files", label: "files", fmt: (v) => v.toLocaleString() },
+};
+
+// Fetch the merged upload calendar and (re)draw. Polls while any source is still
+// scanning, mirroring the catalog's building/poll pattern.
+async function loadContrib() {
+  let data;
+  try { data = await api("/api/contrib"); }
+  catch (e) { return; }               // calendar is non-critical; leave silent on error
+  if (state.source) return;           // navigated into a source meanwhile
+  state.contrib = data;
+  drawContrib(state.contribMetric || "bytes");
+  if (data.building > 0 && !state.source) {
+    clearTimeout(state._contribTimer);
+    state._contribTimer = setTimeout(() => { if (!state.source) loadContrib(); }, 4000);
+  }
+}
+
+// Render the year-of-weeks heatmap into #contrib-cal for a chosen metric.
+function drawContrib(metric) {
+  state.contribMetric = metric;
+  const host = $("#contrib-cal");
+  const data = state.contrib;
+  if (!host || !data) return;
+  const m = CONTRIB_METRICS[metric] || CONTRIB_METRICS.bytes;
+
+  const first = data.span && data.span.first, last = data.span && data.span.last;
+  if (!first || !last) {
+    host.innerHTML = `<div class="contrib-empty">${data.building ? "Scanning uploads…" : "No dated uploads found."}</div>`;
+    $("#contrib-summary").textContent = data.building ? `${data.building} scanning…` : "";
+    return;
+  }
+
+  // Build the day grid from the Sunday on/before `first` to the Saturday on/after
+  // `last`, laid out as columns of weeks (GitHub style). Dates are handled in UTC
+  // to match S3's LastModified day bucketing (avoids TZ off-by-one at week edges).
+  const val = (day) => { const d = data.days[day]; return d ? (d[m.key] || 0) : 0; };
+  const parse = (s) => new Date(s + "T00:00:00Z");
+  const iso = (dt) => dt.toISOString().slice(0, 10);
+  const start = parse(first); start.setUTCDate(start.getUTCDate() - start.getUTCDay());  // back to Sunday
+  const end = parse(last); end.setUTCDate(end.getUTCDate() + (6 - end.getUTCDay()));      // fwd to Saturday
+
+  // Intensity thresholds: quartiles of the NONZERO daily values so a few big days
+  // don't wash everything into bucket 1 (linear scaling would).
+  const nz = [];
+  for (let dt = new Date(start); dt <= end; dt.setUTCDate(dt.getUTCDate() + 1)) {
+    const v = val(iso(dt)); if (v > 0) nz.push(v);
+  }
+  nz.sort((a, b) => a - b);
+  const q = (p) => nz.length ? nz[Math.min(nz.length - 1, Math.floor(p * nz.length))] : 0;
+  const th = [q(0.25), q(0.5), q(0.75), q(0.9)];
+  const bucket = (v) => {
+    if (v <= 0) return 0;
+    if (v <= th[0]) return 1;
+    if (v <= th[1]) return 2;
+    if (v <= th[2]) return 3;
+    return 4;
+  };
+
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const weeks = [];       // array of {days:[{iso,v,inRange}], month:label|null}
+  let cur = new Date(start), lastMonth = -1;
+  while (cur <= end) {
+    const wk = { days: [], month: null };
+    for (let d = 0; d < 7; d++) {
+      const key = iso(cur);
+      const inRange = key >= first && key <= last;
+      wk.days.push({ iso: key, v: val(key), inRange });
+      cur.setUTCDate(cur.getUTCDate() + 1);
+    }
+    // Month label above a week when its first day starts a new month.
+    const mo = parse(wk.days[0].iso).getUTCMonth();
+    if (mo !== lastMonth) { wk.month = MONTHS[mo]; lastMonth = mo; }
+    weeks.push(wk);
+  }
+
+  // Build DOM: month row + [day-of-week gutter | week columns].
+  const monthRow = weeks.map((w) => `<span style="width:15px">${w.month || ""}</span>`).join("");
+  const dow = ["", "Mon", "", "Wed", "", "Fri", ""].map((d) => `<span>${d}</span>`).join("");
+  const cells = weeks.map((w) => {
+    const col = w.days.map((d) => {
+      if (!d.inRange) return `<i class="contrib-cell empty"></i>`;
+      const lv = bucket(d.v);
+      const title = d.v > 0 ? `${d.iso}: ${m.fmt(d.v)} ${m.label}` : `${d.iso}: no uploads`;
+      return `<i class="contrib-cell contrib-day l${lv}" title="${title}"></i>`;
+    }).join("");
+    return `<div class="contrib-week">${col}</div>`;
+  }).join("");
+
+  host.innerHTML =
+    `<div class="contrib-months">${monthRow}</div>` +
+    `<div class="contrib-body"><div class="contrib-dow">${dow}</div><div class="contrib-weeks">${cells}</div></div>`;
+
+  const t = data.totals || {};
+  const totalForMetric = m.key === "bytes" ? fmtBytes(t.bytes) :
+    (m.key === "episodes" ? (t.episodes || 0).toLocaleString() : (t.files || 0).toLocaleString());
+  const notEp = m.key === "episodes" && data.datasets
+    ? data.datasets.filter((d) => d.built_ok !== false && d.counts_episodes === false).length : 0;
+  $("#contrib-summary").textContent =
+    `${totalForMetric} ${m.label} across ${t.days_active || 0} active days` +
+    (data.building ? ` · ${data.building} scanning…` : "") +
+    (notEp ? ` · ${notEp} packed dataset(s) not episode-counted` : "");
 }
 
 async function renderOverview() {

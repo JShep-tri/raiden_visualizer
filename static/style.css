@@ -474,3 +474,46 @@ select:focus { border-color: var(--accent); }
 .cat-badge.building { background: var(--accent-soft); color: var(--accent); }
 .cat-cams { font-size: 11px; margin-bottom: 6px; }
 .cat-prefix { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------- Upload contribution calendar (GitHub-style) ---------- */
+.contrib-wrap { padding: 4px 2px 2px; }
+.contrib-cal { overflow-x: auto; padding-bottom: 6px; }
+/* One month-labeled column group of 7-day weeks. The grid is built in JS as a
+   flex row of week-columns; each week is a vertical stack of 7 day cells. */
+.contrib-months {
+  display: flex; gap: 3px; margin: 0 0 3px 30px;
+  color: var(--text-faint); font-size: 10px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.contrib-months span { flex: 0 0 auto; }
+.contrib-body { display: flex; gap: 6px; }
+.contrib-dow {
+  display: flex; flex-direction: column; gap: 3px;
+  color: var(--text-faint); font-size: 9px; width: 24px; padding-top: 0;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+.contrib-dow span { height: 12px; line-height: 12px; }
+.contrib-weeks { display: flex; gap: 3px; }
+.contrib-week { display: flex; flex-direction: column; gap: 3px; }
+.contrib-cell {
+  width: 12px; height: 12px; border-radius: 2px;
+  background: var(--border-soft); display: inline-block;
+}
+/* intensity buckets — GitHub green ramp, tuned for the dark theme */
+.contrib-cell.l0 { background: #1a1d26; }
+.contrib-cell.l1 { background: #0e4429; }
+.contrib-cell.l2 { background: #006d32; }
+.contrib-cell.l3 { background: #26a641; }
+.contrib-cell.l4 { background: #39d353; }
+.contrib-cell.empty { background: transparent; }
+.contrib-day { cursor: default; }
+.contrib-foot {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 8px; gap: 12px; flex-wrap: wrap;
+}
+.contrib-legend {
+  display: flex; align-items: center; gap: 4px;
+  color: var(--text-faint); font-size: 11px;
+}
+.contrib-legend .contrib-cell { width: 11px; height: 11px; }
+.contrib-empty { color: var(--text-faint); font-size: 12px; padding: 10px 4px; }

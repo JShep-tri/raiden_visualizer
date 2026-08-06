@@ -10,12 +10,13 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import catalog, config, sources
+from . import catalog, config, contrib, sources
 
 app = FastAPI(title="YAM Datasets Viewer", version="0.3.0")
 
 _STATIC = Path(__file__).resolve().parent.parent / "static"
 _CATALOG = catalog.CatalogBuilder()
+_CONTRIB = contrib.ContribBuilder()
 
 
 def _src(sid: str):
@@ -80,6 +81,65 @@ def rebuild_catalog(sid: str):
     src = _src(sid)
     _CATALOG.invalidate(sid)
     _CATALOG.start_deep(sid, src, force=True)
+    return {"ok": True, "building": True}
+
+
+@app.get("/api/contrib")
+def get_contrib():
+    """Upload contribution calendar: how much data landed on S3 each day, merged
+    across datasets (GitHub-style graph). Like /api/catalog it NEVER scans inline —
+    it serves each source's cached daily rollup and kicks missing ones off in the
+    background, returning building=true until every source's recursive listing is
+    done. The merged per-day series (files/bytes/episodes) is assembled here from
+    the cheap cached rollups, so the response is instant once built."""
+    available = sources.get_sources(config.SOURCES)
+    merged: dict[str, dict] = {}
+    per_dataset = []
+    building = 0
+    tot_files = tot_bytes = tot_eps = 0
+    for spec in config.SOURCES:
+        if spec["id"] not in available:
+            continue  # access-gated + unreadable here
+        src = available[spec["id"]]
+        roll = _CONTRIB.get(spec["id"])
+        if roll is None or roll.get("building"):
+            _CONTRIB.start(spec, src)
+            building += 1
+            per_dataset.append({"id": spec["id"], "label": spec["label"], "building": True})
+            continue
+        t = roll.get("totals", {})
+        tot_files += t.get("files", 0)
+        tot_bytes += t.get("bytes", 0)
+        tot_eps += t.get("episodes", 0)
+        per_dataset.append({
+            "id": spec["id"], "label": spec["label"], "kind": roll.get("kind"),
+            "counts_episodes": roll.get("counts_episodes", False),
+            "totals": t, "span": roll.get("span"), "built_ok": roll.get("built_ok", True),
+        })
+        for day, v in (roll.get("days") or {}).items():
+            m = merged.setdefault(day, {"files": 0, "bytes": 0, "episodes": 0})
+            m["files"] += v.get("files", 0)
+            m["bytes"] += v.get("bytes", 0)
+            m["episodes"] += v.get("episodes", 0)
+    day_keys = sorted(merged.keys())
+    return {
+        "days": merged,
+        "datasets": per_dataset,
+        "building": building,
+        "totals": {"files": tot_files, "bytes": tot_bytes, "episodes": tot_eps,
+                   "days_active": len(day_keys)},
+        "span": {"first": day_keys[0] if day_keys else None,
+                 "last": day_keys[-1] if day_keys else None},
+        "region": config.AWS_REGION,
+    }
+
+
+@app.post("/api/contrib/{sid}/rebuild")
+def rebuild_contrib(sid: str):
+    """Force a re-scan of one dataset's daily upload rollup."""
+    src = _src(sid)
+    _CONTRIB.invalidate(sid)
+    _CONTRIB.start(src.spec, src, force=True)
     return {"ok": True, "building": True}
 
 
