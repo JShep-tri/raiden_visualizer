@@ -10,13 +10,14 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import catalog, config, contrib, sources
+from . import catalog, config, contrib, raiden_teachers, sources
 
 app = FastAPI(title="YAM Datasets Viewer", version="0.3.0")
 
 _STATIC = Path(__file__).resolve().parent.parent / "static"
 _CATALOG = catalog.CatalogBuilder()
 _CONTRIB = contrib.ContribBuilder()
+_TEACHERS = raiden_teachers.TeacherBuilder()
 
 
 def _src(sid: str):
@@ -144,6 +145,64 @@ def rebuild_contrib(sid: str):
     src = _src(sid)
     _CONTRIB.invalidate(sid)
     _CONTRIB.start(src.spec, src, force=True)
+    return {"ok": True, "building": True}
+
+
+@app.get("/api/raiden_teachers")
+def get_raiden_teachers():
+    """Raiden teleop-by-teacher daily breakdown for the per-teacher bar chart.
+
+    Only raiden-format sources record ``teacher_name`` (raiden / yam_russet /
+    rollouts), so we scan just those and merge their per-(day, teacher) rollups.
+    Like the other calendars this serves cached rollups instantly and scans
+    missing ones in the background (building=true until done). Days are keyed by
+    CAPTURE date (metadata timestamp) — "how much teleop we collected per day"."""
+    available = sources.get_sources(config.SOURCES)
+    merged: dict[str, dict] = {}          # day -> {teacher -> {episodes, seconds}}
+    teacher_totals: dict[str, dict] = {}  # teacher -> {episodes, seconds}
+    building = 0
+    considered = 0
+    for spec in config.SOURCES:
+        if spec["id"] not in available or not raiden_teachers.supports(spec):
+            continue
+        considered += 1
+        src = available[spec["id"]]
+        roll = _TEACHERS.get(spec["id"])
+        if roll is None or roll.get("building"):
+            _TEACHERS.start(spec, src)
+            building += 1
+            continue
+        for day, per in (roll.get("days") or {}).items():
+            md = merged.setdefault(day, {})
+            for teacher, v in per.items():
+                m = md.setdefault(teacher, {"episodes": 0, "seconds": 0.0})
+                m["episodes"] += v.get("episodes", 0)
+                m["seconds"] += v.get("seconds", 0.0)
+        for teacher, v in (roll.get("totals_by_teacher") or {}).items():
+            tt = teacher_totals.setdefault(teacher, {"episodes": 0, "seconds": 0.0})
+            tt["episodes"] += v.get("episodes", 0)
+            tt["seconds"] += v.get("seconds", 0.0)
+    teachers = sorted(teacher_totals.keys(),
+                      key=lambda t: teacher_totals[t]["episodes"], reverse=True)
+    day_keys = sorted(merged.keys())
+    return {
+        "days": merged,
+        "teachers": teachers,
+        "totals_by_teacher": {t: {"episodes": v["episodes"], "seconds": round(v["seconds"], 1)}
+                              for t, v in teacher_totals.items()},
+        "building": building,
+        "sources_considered": considered,
+        "span": {"first": day_keys[0] if day_keys else None,
+                 "last": day_keys[-1] if day_keys else None},
+    }
+
+
+@app.post("/api/raiden_teachers/{sid}/rebuild")
+def rebuild_raiden_teachers(sid: str):
+    """Force a re-scan of one raiden source's teacher-by-day rollup."""
+    src = _src(sid)
+    _TEACHERS.invalidate(sid)
+    _TEACHERS.start(src.spec, src, force=True)
     return {"ok": True, "building": True}
 
 

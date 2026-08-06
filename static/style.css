@@ -476,8 +476,26 @@ select:focus { border-color: var(--accent); }
 .cat-prefix { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ---------- Upload contribution calendar (GitHub-style) ---------- */
+/* Two charts side by side: the upload calendar + the raiden teleop-per-day bars.
+   Stacks to one column on narrow screens. */
+.contrib-row {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 24px;
+  align-items: start;
+}
+.contrib-row .contrib-card { margin-bottom: 0; }
+@media (max-width: 900px) { .contrib-row { grid-template-columns: 1fr; } }
 .contrib-card { margin-bottom: 24px; }
 .contrib-wrap { padding: 4px 2px 2px; }
+/* Raiden teacher bar chart */
+.teacher-controls { display: flex; align-items: center; gap: 10px; }
+.teacher-select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: var(--radius-sm); padding: 4px 8px; font-size: 12px; outline: none;
+  font-family: 'JetBrains Mono', ui-monospace, monospace; max-width: 150px;
+}
+.teacher-select:focus { border-color: var(--accent); }
+.teacher-wrap { padding: 8px 2px 2px; }
+.teacher-wrap canvas { width: 100%; height: 220px; display: block; }
 /* Dataset-subset filter (chips above the calendar). */
 .contrib-filter {
   display: flex; flex-wrap: wrap; gap: 6px; align-items: center;

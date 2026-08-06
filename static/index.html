@@ -52,28 +52,49 @@
       </header>
       <div class="cat-agg" id="cat-agg"></div>
 
-      <section class="card contrib-card">
-        <div class="card-head">
-          <h3>Upload activity</h3>
-          <div id="contrib-metric-toggle" class="seg">
-            <button data-metric="bytes" class="active">Data</button>
-            <button data-metric="episodes">Episodes</button>
-            <button data-metric="files">Files</button>
+      <div class="contrib-row">
+        <section class="card contrib-card">
+          <div class="card-head">
+            <h3>Upload activity</h3>
+            <div id="contrib-metric-toggle" class="seg">
+              <button data-metric="bytes" class="active">Data</button>
+              <button data-metric="episodes">Episodes</button>
+              <button data-metric="files">Files</button>
+            </div>
           </div>
-        </div>
-        <div class="contrib-wrap">
-          <div id="contrib-filter" class="contrib-filter"></div>
-          <div id="contrib-cal" class="contrib-cal"></div>
-          <div class="contrib-foot">
-            <span id="contrib-summary" class="subtle mono"></span>
-            <span class="contrib-legend">
-              Less
-              <i class="contrib-cell l0"></i><i class="contrib-cell l1"></i><i class="contrib-cell l2"></i><i class="contrib-cell l3"></i><i class="contrib-cell l4"></i>
-              More
-            </span>
+          <div class="contrib-wrap">
+            <div id="contrib-filter" class="contrib-filter"></div>
+            <div id="contrib-cal" class="contrib-cal"></div>
+            <div class="contrib-foot">
+              <span id="contrib-summary" class="subtle mono"></span>
+              <span class="contrib-legend">
+                Less
+                <i class="contrib-cell l0"></i><i class="contrib-cell l1"></i><i class="contrib-cell l2"></i><i class="contrib-cell l3"></i><i class="contrib-cell l4"></i>
+                More
+              </span>
+            </div>
           </div>
-        </div>
-      </section>
+        </section>
+
+        <section class="card contrib-card teacher-card">
+          <div class="card-head">
+            <h3>Raiden teleop per day</h3>
+            <div class="teacher-controls">
+              <select id="teacher-select" class="teacher-select" title="Filter by teacher"></select>
+              <div id="teacher-metric-toggle" class="seg">
+                <button data-metric="episodes" class="active">Episodes</button>
+                <button data-metric="minutes">Minutes</button>
+              </div>
+            </div>
+          </div>
+          <div class="teacher-wrap">
+            <canvas id="teacher-canvas"></canvas>
+            <div class="contrib-foot">
+              <span id="teacher-summary" class="subtle mono"></span>
+            </div>
+          </div>
+        </section>
+      </div>
 
       <section class="card cat-chart-card">
         <div class="card-head">

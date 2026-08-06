@@ -96,6 +96,17 @@ async function init() {
     document.querySelectorAll("#contrib-metric-toggle button").forEach((x) => x.classList.toggle("active", x === b));
     drawContrib(b.dataset.metric);
   });
+  // Raiden teleop-per-day: teacher picker + metric (episodes / minutes) toggle.
+  $("#teacher-select").addEventListener("change", (ev) => {
+    state.teacherFilter = ev.target.value;
+    drawTeachers(state.teacherMetric || "episodes");
+  });
+  $("#teacher-metric-toggle").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    document.querySelectorAll("#teacher-metric-toggle button").forEach((x) => x.classList.toggle("active", x === b));
+    drawTeachers(b.dataset.metric);
+  });
   // Episode navigation: prev/next buttons, slider scrub, and ←/→ arrow keys.
   $("#ep-prev").addEventListener("click", () => stepEpisode(-1));
   $("#ep-next").addEventListener("click", () => stepEpisode(1));
@@ -236,7 +247,8 @@ async function renderCatalog() {
   // Stash the cards for the comparison bar chart (redrawn on metric toggle / resize).
   state.catalog = data.datasets;
   drawCatalogBars(state.catMetric || "episodes");
-  loadContrib();  // upload-activity calendar (independent /api/contrib scan)
+  loadContrib();   // upload-activity calendar (independent /api/contrib scan)
+  loadTeachers();  // raiden teleop-per-day-by-teacher bars (/api/raiden_teachers)
 
   $("#cat-hint").textContent = a.building ? `${a.building} computing…` : `${a.num_datasets} datasets`;
   // Poll while any dataset's deep summary is still building.
@@ -494,6 +506,118 @@ function drawContrib(metric) {
   $("#contrib-summary").textContent =
     `${totalForMetric} ${m.label}${scope} across ${t.days_active || 0} active days` +
     (view.building ? ` · scanning…` : "") + notEpNote;
+}
+
+/* -------- Raiden teleop-per-day, toggled by teacher (bar chart) -------- */
+// Fetch the teacher-by-day rollup and (re)draw. Polls while raiden sources scan.
+async function loadTeachers() {
+  let data;
+  try { data = await api("/api/raiden_teachers"); }
+  catch (e) { return; }
+  if (state.source) return;
+  state.teachers = data;
+  // Populate the teacher <select> (All + each teacher, episode-sorted) once we
+  // have data; preserve the current selection across polls.
+  const sel = $("#teacher-select");
+  if (sel) {
+    const cur = state.teacherFilter || "all";
+    const tot = data.totals_by_teacher || {};
+    const opts = [`<option value="all">All teachers</option>`].concat(
+      (data.teachers || []).map((t) =>
+        `<option value="${t}">${t} (${(tot[t] || {}).episodes || 0})</option>`));
+    sel.innerHTML = opts.join("");
+    sel.value = (data.teachers || []).includes(cur) || cur === "all" ? cur : "all";
+    state.teacherFilter = sel.value;
+  }
+  drawTeachers(state.teacherMetric || "episodes");
+  if (data.building > 0 && !state.source) {
+    clearTimeout(state._teacherTimer);
+    state._teacherTimer = setTimeout(() => { if (!state.source) loadTeachers(); }, 4000);
+  }
+}
+
+const TEACHER_METRICS = {
+  episodes: { label: "episodes", fmt: (v) => v.toLocaleString(),
+              pick: (rec) => rec.episodes || 0 },
+  minutes: { label: "minutes", fmt: (v) => (v >= 100 ? Math.round(v) : v.toFixed(1)),
+             pick: (rec) => (rec.seconds || 0) / 60 },
+};
+
+// Vertical per-day bars of raiden teleop volume, for the selected teacher (or all).
+function drawTeachers(metric) {
+  state.teacherMetric = metric;
+  const data = state.teachers;
+  const canvas = $("#teacher-canvas");
+  if (!canvas || !data) return;
+  const m = TEACHER_METRICS[metric] || TEACHER_METRICS.episodes;
+  const who = state.teacherFilter || "all";
+
+  const first = data.span && data.span.first, last = data.span && data.span.last;
+  const summary = $("#teacher-summary");
+  const { ctx, W, H } = setupCanvas("teacher-canvas");
+  if (!first || !last) {
+    ctx.fillStyle = "#626875"; ctx.font = "12px 'Inter', sans-serif"; ctx.textAlign = "left";
+    ctx.fillText(data.building ? "Scanning raiden metadata…" : "No raiden teleop found.", 8, 22);
+    if (summary) summary.textContent = data.building ? `${data.building} scanning…` : "";
+    return;
+  }
+
+  // Build a continuous daily series first..last (gaps = 0), summing the chosen
+  // metric for the selected teacher (or across all teachers).
+  const parse = (s) => new Date(s + "T00:00:00Z");
+  const iso = (dt) => dt.toISOString().slice(0, 10);
+  const dayVal = (day) => {
+    const per = data.days[day]; if (!per) return 0;
+    if (who === "all") return Object.values(per).reduce((s, r) => s + m.pick(r), 0);
+    return per[who] ? m.pick(per[who]) : 0;
+  };
+  const days = [];
+  for (let dt = parse(first); dt <= parse(last); dt.setUTCDate(dt.getUTCDate() + 1)) {
+    const k = iso(dt); days.push({ day: k, v: dayVal(k) });
+  }
+  const maxV = Math.max(1, ...days.map((d) => d.v));
+  const total = days.reduce((s, d) => s + d.v, 0);
+  const active = days.filter((d) => d.v > 0).length;
+
+  // Plot: y-axis ticks on the left, one bar per day left→right.
+  const padL = 40, padR = 8, padTop = 10, padBot = 26;
+  const plotW = W - padL - padR, plotH = H - padTop - padBot;
+  ctx.font = "10px 'JetBrains Mono', monospace";
+  let ticks = niceTicks(0, maxV, 4);
+  const step = ticks.length > 1 ? ticks[1] - ticks[0] : (maxV || 1);
+  let tickMax = ticks[ticks.length - 1] || maxV;
+  while (tickMax < maxV) { tickMax += step; ticks.push(tickMax); }
+  ticks.forEach((v) => {
+    const y = padTop + plotH * (1 - v / tickMax);
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(W - padR, y); ctx.stroke();
+    ctx.fillStyle = "#626875"; ctx.textAlign = "right";
+    ctx.fillText(m.fmt(v), padL - 6, y + 3);
+  });
+  // bars
+  const n = days.length;
+  const slot = plotW / n, bw = Math.max(1, Math.min(18, slot - 2));
+  days.forEach((d, i) => {
+    if (d.v <= 0) return;
+    const x = padL + i * slot + (slot - bw) / 2;
+    const bh = plotH * (d.v / tickMax);
+    const y = padTop + plotH - bh;
+    ctx.fillStyle = "#6ea8fe";
+    roundRect(ctx, x, y, bw, bh, 2); ctx.fill();
+  });
+  // sparse x date labels (first, last, and mid) to avoid clutter
+  ctx.fillStyle = "#626875"; ctx.font = "9px 'JetBrains Mono', monospace"; ctx.textAlign = "center";
+  const idxs = n <= 1 ? [0] : [0, Math.floor((n - 1) / 2), n - 1];
+  [...new Set(idxs)].forEach((i) => {
+    const x = padL + i * slot + slot / 2;
+    ctx.fillText(days[i].day.slice(5), x, H - padBot + 16);  // MM-DD
+  });
+
+  if (summary) {
+    const label = who === "all" ? "all teachers" : who;
+    summary.textContent = `${m.fmt(total)} ${m.label} — ${label} across ${active} active days` +
+      (data.building ? ` · scanning…` : "");
+  }
 }
 
 async function renderOverview() {
