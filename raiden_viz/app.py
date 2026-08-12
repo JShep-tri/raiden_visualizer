@@ -247,6 +247,15 @@ def list_episodes(sid: str, task: str):
     return {"task": task, "episodes": _src(sid).list_episodes(task)}
 
 
+# Not nested under /episodes/ so it can't be mistaken for an episode named "facts".
+@app.get("/api/sources/{sid}/tasks/{task}/episode-facts")
+def episode_facts(sid: str, task: str):
+    """Timestamp + status per episode, for labelling the browse list. Fetched
+    separately from /episodes so the list renders immediately and the labels fill
+    in when ready; {} where a source has nothing cheap to report."""
+    return {"task": task, "facts": _src(sid).episode_facts(task)}
+
+
 @app.get("/api/sources/{sid}/tasks/{task}/episodes/{episode}")
 def episode_detail(sid: str, task: str, episode: str):
     try:

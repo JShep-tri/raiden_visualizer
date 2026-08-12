@@ -167,7 +167,17 @@
       </section>
 
       <section class="card">
-        <div class="card-head"><h3>Tasks</h3><span id="ov-task-hint" class="subtle mono"></span></div>
+        <div class="card-head">
+          <h3>Tasks</h3>
+          <div class="controls">
+            <div id="ov-task-sort" class="seg">
+              <button data-sort="episodes" class="active">Episodes</button>
+              <button data-sort="collected" title="Most recently collected first">Collected</button>
+              <button data-sort="name">Name</button>
+            </div>
+            <span id="ov-task-hint" class="subtle mono"></span>
+          </div>
+        </div>
         <div class="ov-task-list" id="ov-task-list"></div>
       </section>
     </div>

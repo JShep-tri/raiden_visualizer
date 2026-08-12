@@ -14,7 +14,11 @@ const state = {
   task: null,
   episodes: [],
   episode: null,
+  facts: {},        // episode -> { timestamp, status } for the browse list labels
   detail: null,
+  overviewTasks: [], // per-task rows from /overview (counts + collection span)
+  taskSort: "episodes",  // Tasks-card sort: episodes | collected | name
+  hoursInputs: null,     // last /stats pass, so a re-sort can refill the hours cells
   eye: "left",
   tiles: [],        // { camera, video, onReady } for each grid cell with video
   master: null,     // the video element that drives the shared timeline
@@ -107,6 +111,14 @@ async function init() {
     document.querySelectorAll("#teacher-metric-toggle button").forEach((x) => x.classList.toggle("active", x === b));
     drawTeachers(b.dataset.metric);
   });
+  // Tasks-card sort (Episodes / Collected / Name) — re-sorts the loaded rows, no refetch.
+  $("#ov-task-sort").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    document.querySelectorAll("#ov-task-sort button").forEach((x) => x.classList.toggle("active", x === b));
+    state.taskSort = b.dataset.sort;
+    renderTaskList();
+  });
   // Episode navigation: prev/next buttons, slider scrub, and ←/→ arrow keys.
   $("#ep-prev").addEventListener("click", () => stepEpisode(-1));
   $("#ep-next").addEventListener("click", () => stepEpisode(1));
@@ -136,6 +148,7 @@ async function init() {
 async function selectSource(sid, autoTask = null, autoEpisode = null) {
   state.source = sid;
   state.episode = null;
+  state.hoursInputs = null;   // the previous dataset's per-task hours don't apply here
   clearTimeout(state._catTimer);   // stop catalog polling once we enter a source
   document.body.classList.remove("catalog-mode");  // reveal the episode-browser sidebar
   $("#catalog-view").classList.add("hidden");
@@ -657,34 +670,83 @@ async function renderOverview() {
       stats.appendChild(c);
     }
 
-    const maxEp = Math.max(1, ...ov.tasks.map((t) => t.episodes));
-    const list = $("#ov-task-list");
-    list.innerHTML = "";
-    $("#ov-task-hint").textContent = `${ov.num_tasks} total`;
-    ov.tasks.forEach((t) => {
-      const row = el("div", "ov-task-row");
-      row.appendChild(el("div", "t-name", t.task));
-      const bar = el("div", "t-bar");
-      const fill = el("i");
-      fill.style.width = `${(t.episodes / maxEp) * 100}%`;
-      bar.appendChild(fill);
-      row.appendChild(bar);
-      row.appendChild(el("div", "t-count", `${t.episodes} ep`));
-      // Per-task hours — filled in by updateHoursCard once /api/stats loads.
-      const hrs = el("div", "t-hours", "…");
-      hrs.dataset.task = t.task;
-      row.appendChild(hrs);
-      const latest = t.latest ? parseEpisodeName(t.latest).when || "" : "";
-      row.appendChild(el("div", "t-latest", latest ? latest.split(" · ")[0] : ""));
-      row.onclick = () => selectTask(t.task);
-      list.appendChild(row);
-    });
-
     state.overviewTasks = ov.tasks;  // per-task totals, for extrapolating hours
+    state.numTasks = ov.num_tasks;
+    renderTaskList();
     renderAnalytics(ov.tasks.map((t) => t.task));
   } catch (e) {
     toast("Failed to load overview: " + e.message);
   }
+}
+
+/* ---------------- Overview: per-task breakdown ---------------- */
+
+// Sort comparators for the Tasks card. "collected" is newest-collected first (the
+// useful direction: what was recorded most recently); tasks whose format carries no
+// timestamp sort last so they never displace dated ones.
+const TASK_SORTS = {
+  episodes: (a, b) => b.episodes - a.episodes,
+  name: (a, b) => a.task.localeCompare(b.task),
+  collected: (a, b) => {
+    const av = a.collected_end || "", bv = b.collected_end || "";
+    if (!av && !bv) return b.episodes - a.episodes;
+    if (!av) return 1;
+    if (!bv) return -1;
+    return bv.localeCompare(av);   // ISO8601 sorts lexicographically
+  },
+};
+
+function renderTaskList() {
+  const tasks = state.overviewTasks || [];
+  const list = $("#ov-task-list");
+  list.innerHTML = "";
+  const mode = state.taskSort || "episodes";
+  // Hide the Collected sort where the format has no capture timestamps (LeRobot):
+  // offering a sort that can't order anything would just look broken.
+  const anyDated = tasks.some((t) => t.collected_end);
+  $("#ov-task-sort").classList.toggle("hidden", !anyDated);
+  const sorted = tasks.slice().sort(TASK_SORTS[mode] || TASK_SORTS.episodes);
+  $("#ov-task-hint").textContent = `${state.numTasks ?? tasks.length} total`;
+  const maxEp = Math.max(1, ...tasks.map((t) => t.episodes));
+  sorted.forEach((t) => {
+    const row = el("div", "ov-task-row");
+    row.appendChild(el("div", "t-name", t.task));
+    const bar = el("div", "t-bar");
+    const fill = el("i");
+    fill.style.width = `${(t.episodes / maxEp) * 100}%`;
+    bar.appendChild(fill);
+    row.appendChild(bar);
+    row.appendChild(el("div", "t-count", `${t.episodes} ep`));
+    // Per-task hours — filled in by updateHoursCard once /api/stats loads.
+    const hrs = el("div", "t-hours", "…");
+    hrs.dataset.task = t.task;
+    row.appendChild(hrs);
+    row.appendChild(taskWhenCell(t));
+    row.onclick = () => selectTask(t.task);
+    list.appendChild(row);
+  });
+  // Rows were rebuilt, so their hours cells are back to "…" — refill from the last
+  // stats pass if it already landed (a re-sort must not lose them).
+  const h = state.hoursInputs;
+  if (h) updatePerTaskHours(h.eps, h.stats, h.estimated);
+}
+
+// The date cell: the collection span from the backend (start–end, or a single date
+// for a one-day task), falling back to the date parsed out of the latest episode's
+// name for formats that report no timestamps.
+function taskWhenCell(t) {
+  const start = t.collected_start ? t.collected_start.slice(0, 10) : null;
+  const end = t.collected_end ? t.collected_end.slice(0, 10) : null;
+  if (!start && !end) {
+    const parsed = t.latest ? parseEpisodeName(t.latest).when : null;
+    return el("div", "t-latest", parsed ? parsed.split(" · ")[0] : "");
+  }
+  // Show a range only when both ends are known AND differ; a single known bound (or a
+  // same-day task) shows one date rather than a half-empty arrow.
+  const text = (start && end && start !== end) ? `${start} → ${end}` : (end || start);
+  const cell = el("div", "t-latest", text);
+  cell.title = `collected ${t.collected_start || "unknown"} → ${t.collected_end || "unknown"}`;
+  return cell;
 }
 
 /* ---------------- Overview analytics charts ---------------- */
@@ -779,6 +841,9 @@ function updateHoursCard(eps, stats) {
 // Fill the per-task hours cells. For sampled sources, scale each task's own
 // sampled mean by its full episode count (from the overview's per-task totals).
 function updatePerTaskHours(eps, stats, estimated) {
+  // Stashed so re-sorting the Tasks card (which rebuilds the rows) can refill the
+  // cells without refetching stats.
+  state.hoursInputs = { eps, stats, estimated };
   const byTask = {};  // task -> {sum, n}
   eps.forEach((e) => {
     const b = byTask[e.task] || (byTask[e.task] = { sum: 0, n: 0 });
@@ -1140,17 +1205,32 @@ function niceTicks(lo, hi, count) {
 
 async function selectTask(task, autoEpisode = null) {
   state.task = task;
+  state.facts = {};
   $("#task-select").value = task;
   try {
     const { episodes } = await api(`${apiBase()}/tasks/${encodeURIComponent(task)}/episodes`);
     state.episodes = episodes;
     renderEpisodeList();
+    loadEpisodeFacts(task);   // fills in timestamps/status when it lands
     if (autoEpisode && episodes.includes(autoEpisode)) {
       await selectEpisode(autoEpisode);
     }
   } catch (e) {
     toast("Failed to load episodes: " + e.message);
   }
+}
+
+// Timestamp + success/failure per episode, for the sidebar rows. Fetched after the
+// list renders (it can take a few seconds on a big task) and never fatal: a failure
+// or an unsupported source just leaves the rows showing indices only. Stamped with
+// the task it was requested for so a fast task switch can't apply stale labels.
+async function loadEpisodeFacts(task) {
+  try {
+    const r = await api(`${apiBase()}/tasks/${encodeURIComponent(task)}/episode-facts`);
+    if (state.task !== task) return;
+    state.facts = r.facts || {};
+    renderEpisodeList();
+  } catch (_) { /* labels are optional */ }
 }
 
 // Episode lists can be very large (YAM tasks have >1000). Cap the rendered rows
@@ -1161,18 +1241,34 @@ function renderEpisodeList() {
   const filter = $("#episode-search").value.toLowerCase();
   const list = $("#episode-list");
   list.innerHTML = "";
-  // Index is the episode's stable position in the task list (newest = #1), so it
-  // doesn't renumber as the search box narrows the visible rows.
+  // Index is the episode's stable position in the task list — ZERO-based, oldest
+  // first, so it matches the episode numbering raiden itself records on disk
+  // (0000, 0001, ...). Computed off the full list so it doesn't renumber as the
+  // search box narrows the visible rows.
   const matched = state.episodes
-    .map((ep, i) => ({ ep, idx: i + 1 }))
+    .map((ep, i) => ({ ep, idx: i }))
     .filter(({ ep }) => ep.toLowerCase().includes(filter));
   const shown = matched.slice(0, EPISODE_RENDER_CAP);
   $("#episode-count").textContent = matched.length;
+  const width = String(Math.max(0, state.episodes.length - 1)).length;
   shown.forEach(({ ep, idx }) => {
     const li = el("li");
     li.classList.toggle("active", ep === state.episode);
-    // Simplified sidebar: just the index — no station, no timestamp.
-    li.appendChild(el("div", "ep-li-idx mono", `#${idx}`));
+    const head = el("div", "ep-li-head");
+    // Zero-padded to the task's widest index so the rows form a clean column.
+    head.appendChild(el("div", "ep-li-idx mono", String(idx).padStart(width, "0")));
+    const f = (state.facts || {})[ep];
+    const st = (f && f.status ? f.status : "").toLowerCase();
+    if (st) {
+      const badge = el("div", "ep-li-status " + statusClass(st), statusMark(st));
+      badge.title = f.status;
+      head.appendChild(badge);
+    }
+    li.appendChild(head);
+    // Timestamp: from the metadata when we have it, else parsed out of the
+    // episode's own name (raiden dirs are station_<ISO timestamp>).
+    const when = (f && f.timestamp) ? formatStamp(f.timestamp) : parseEpisodeName(ep).when;
+    if (when) li.appendChild(el("div", "ep-li-when mono", when));
     li.onclick = () => selectEpisode(ep);
     list.appendChild(li);
   });
@@ -1181,6 +1277,25 @@ function renderEpisodeList() {
     more.style.pointerEvents = "none";
     list.appendChild(more);
   }
+}
+
+// success/failure/pending -> the status-badge palette already used on the detail page.
+function statusClass(st) {
+  if (st === "success") return "success";
+  if (st === "failure" || st === "fail") return "failure";
+  return "neutral";
+}
+
+// A compact glyph rather than the word, to fit the sidebar row (title carries the word).
+function statusMark(st) {
+  return st === "success" ? "✓" : (st === "failure" || st === "fail") ? "✕" : "•";
+}
+
+// "2026-08-04T17:19:47.275092" -> "2026-08-04 · 17:19:47" (no Date parsing: these are
+// local wallclock stamps with no zone, and Date would re-interpret them).
+function formatStamp(ts) {
+  const m = String(ts).match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})/);
+  return m ? `${m[1]} · ${m[2]}` : null;
 }
 
 // Episode names are either "station_2026-06-30T17-19-12..." (raiden) or
@@ -1229,16 +1344,19 @@ function updateEpisodeNav() {
   const prev = $("#ep-prev");
   const next = $("#ep-next");
   if (i < 0 || !n) {
-    pos.textContent = "0 / 0";
+    pos.textContent = "— / —";
     slider.max = "0"; slider.value = "0"; slider.disabled = true;
     prev.disabled = next.disabled = true;
     return;
   }
   slider.disabled = false;
   slider.max = String(n - 1);
-  // Slider left→right = first→last in the task list (which is newest→oldest).
+  // Slider left→right = first→last in the task list (which is oldest→newest).
   slider.value = String(i);
-  pos.textContent = `${i + 1} / ${n}`;
+  // Zero-based index / highest index, zero-padded to match the sidebar labels (and
+  // raiden's own numbering) — "ep" makes it read as an index, not an Nth-of-M count.
+  const w = String(n - 1).length;
+  pos.textContent = `ep ${String(i).padStart(w, "0")} / ${n - 1}`;
   prev.disabled = i === 0;
   next.disabled = i === n - 1;
 }

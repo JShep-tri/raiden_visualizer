@@ -5,8 +5,9 @@ Source subclass exposing the same methods, so the API routes and the frontend ar
 format-agnostic:
 
     list_tasks()                    -> [task, ...]
-    list_episodes(task)             -> [episode, ...]   (newest first)
+    list_episodes(task)             -> [episode, ...]   (oldest first)
     episode_detail(task, episode)   -> {instruction, status, cameras[], robot, ...}
+    episode_facts(task)             -> {episode: {timestamp, status}}  (cheap)
     video_path(task, episode, cam)  -> local Path to a decoded MP4
     episode_stat(task, episode)     -> compact record for analytics
     overview() / stats()            -> dataset-wide aggregates
@@ -108,12 +109,30 @@ class Source:
         return s3.list_dirs(self.prefix, bucket=self.bucket)
 
     def list_episodes(self, task: str) -> list[str]:
+        # Oldest first, matching how the raiden recorder numbers episodes on disk
+        # (0000, 0001, ... in capture order) so viewer index == recording index.
+        # Both naming schemes sort chronologically as strings: zero-padded counters
+        # (0000/0001) and station_<ISO-timestamp> dirs.
         eps = s3.list_dirs(f"{self.prefix}/{task}", bucket=self.bucket)
-        return sorted(eps, reverse=True)
+        return sorted(eps)
 
     # ---- per-source ----
     def episode_detail(self, task: str, episode: str) -> dict:
         raise NotImplementedError
+
+    def episode_facts(self, task: str) -> dict:
+        """Cheap per-episode facts for the browse list: {episode: {timestamp, status}}.
+
+        Must stay listing-cheap (no per-episode GETs unless they're small): this is
+        called on every task switch to label the sidebar. Sources with nothing cheap
+        to offer return {} and the sidebar just shows indices."""
+        return {}
+
+    def episode_time(self, task: str, episode: str) -> str | None:
+        """Capture wallclock (ISO8601) of ONE episode, as cheaply as the format
+        allows — overview() calls it twice per task (first + last) to date the task.
+        None where the format carries no timestamp."""
+        return None
 
     def video_path(self, task: str, episode: str, camera: str, eye: str) -> Path:
         raise NotImplementedError
@@ -128,18 +147,68 @@ class Source:
         for task in tasks:
             eps = self.list_episodes(task)
             total += len(eps)
-            latest = eps[0] if eps else None
+            latest = eps[-1] if eps else None  # lists are oldest-first
             for ep in eps:
                 m = re.match(r"^([A-Za-z][\w-]*)_\d{4}-\d{2}-\d{2}T", ep)
                 if m:
                     stations.add(m.group(1))
-            per_task.append({"task": task, "episodes": len(eps), "latest": latest})
+            per_task.append({"task": task, "episodes": len(eps), "latest": latest,
+                             "_eps": eps})
         per_task.sort(key=lambda t: t["episodes"], reverse=True)
+        self._add_collection_span(per_task)
         return {
             "source": self.id, "bucket": self.bucket, "prefix": self.prefix,
             "num_tasks": len(tasks), "num_episodes": total,
             "stations": sorted(stations), "tasks": per_task,
         }
+
+    # How many episodes to try inward from each end of a task before giving up on
+    # dating it. Episode lists are chronological, so the first/last episode normally
+    # answers it in one read — but an episode can be missing its metadata (an aborted
+    # recording leaves the directory behind), which would otherwise blank the date.
+    SPAN_PROBE_DEPTH = 3
+
+    def _add_collection_span(self, per_task: list[dict]) -> None:
+        """Stamp each task row with when it was collected: ``collected_start`` /
+        ``collected_end`` (ISO8601, None where the format has no timestamps).
+
+        Episode lists are chronological, so a task's span is its first and last
+        episode — a couple of cheap reads per task instead of one per episode. Reads
+        run in parallel across tasks; a source without timestamps leaves every value
+        None (episode_time returns None) and the frontend hides the sort.
+        """
+        jobs = []
+        for row in per_task:
+            eps = row.pop("_eps")
+            d = self.SPAN_PROBE_DEPTH
+            for key, candidates in (("collected_start", eps[:d]),
+                                    ("collected_end", eps[::-1][:d])):
+                row[key] = None
+                if candidates:
+                    jobs.append((row, key, candidates))
+        if not jobs:
+            return
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            times = pool.map(lambda j: self._first_time(j[2], j[0]["task"]), jobs)
+        for (row, key, _), ts in zip(jobs, times):
+            row[key] = ts
+
+    def _first_time(self, episodes: list[str], task: str) -> str | None:
+        """The first readable timestamp among ``episodes``, in order (they're ordered
+        outermost-first, so this walks inward from one end of the task)."""
+        for ep in episodes:
+            ts = self._safe_episode_time(task, ep)
+            if ts:
+                return ts
+        return None
+
+    def _safe_episode_time(self, task, episode) -> str | None:
+        """episode_time that never breaks the overview: one unreadable episode just
+        leaves that end of the span unknown."""
+        try:
+            return self.episode_time(task, episode)
+        except Exception:
+            return None
 
     # Per-source cap on how many episodes a *quick* (non-full) stats pass samples.
     # Reading one stat is cheap, but datasets can have tens of thousands of
@@ -275,6 +344,25 @@ class RaidenSource(Source):
     def _ep_prefix(self, task, episode):
         return f"{self.prefix}/{task}/{episode}"
 
+    def episode_time(self, task: str, episode: str) -> str | None:
+        # The recorder's own capture stamp, from the ~1 KB metadata.json (via the
+        # etag-keyed stat cache, so the overview's reads are paid once).
+        rec = self._safe_stat(task, episode)
+        return rec.get("timestamp") if rec else None
+
+    def episode_facts(self, task: str) -> dict:
+        # metadata.json is ~1 KB, so fetching one per episode in parallel is cheap
+        # enough to label the whole browse list (largest raiden task is ~270 eps).
+        # Reuses the etag-keyed stat cache, so repeat visits are served from disk.
+        eps = self.list_episodes(task)
+        out = {}
+        with ThreadPoolExecutor(max_workers=32) as pool:
+            recs = pool.map(lambda e: (e, self._safe_stat(task, e)), eps)
+        for ep, rec in recs:
+            if rec:
+                out[ep] = {"timestamp": rec.get("timestamp"), "status": rec.get("status")}
+        return out
+
     def episode_detail(self, task, episode):
         prefix = self._ep_prefix(task, episode)
         metadata = s3.get_json(f"{prefix}/metadata.json", bucket=self.bucket)
@@ -385,6 +473,33 @@ class YamMcapSource(Source):
     def _mcap_key(self, task, episode):
         name = self.spec.get("mcap_name", "output.mcap")
         return f"{self.prefix}/{task}/{episode}/{name}"
+
+    # Skip the browse-list timestamp listing for tasks bigger than this: the labels
+    # are a browsing nicety, not worth paging tens of thousands of keys (ABC-130k's
+    # largest task has ~11k episodes) on every task switch.
+    FACTS_MAX_EPISODES = 2000
+
+    def episode_time(self, task: str, episode: str) -> str | None:
+        # A HEAD on the MCAP: no download, and its LastModified is the closest
+        # available wallclock stamp (uuid episode ids carry no time).
+        obj = s3.try_head(self._mcap_key(task, episode), bucket=self.bucket)
+        return obj.last_modified if obj else None
+
+    def episode_facts(self, task: str) -> dict:
+        # uuid-named episodes carry no timestamp, and the MCAP is far too big to
+        # open here — but a single recursive listing yields every episode's MCAP
+        # LastModified, the closest available wallclock stamp. No status: the MCAP
+        # format has no success/failure field.
+        # Size-check on the cheaper delimiter listing first, so an oversized task
+        # bails without paying for the recursive walk.
+        if len(self.list_episodes(task)) > self.FACTS_MAX_EPISODES:
+            return {}
+        name = self.spec.get("mcap_name", "output.mcap")
+        out = {}
+        for obj in s3.list_keys(f"{self.prefix}/{task}", bucket=self.bucket, suffix=name):
+            ep = obj.key[len(f"{self.prefix}/{task}/"):].rsplit("/", 1)[0]
+            out[ep] = {"timestamp": obj.last_modified, "status": None}
+        return out
 
     def _mine(self, obj, task=None, episode=None) -> dict:
         """Download the raw MCAP to a TEMP file, extract everything (all camera
@@ -723,8 +838,8 @@ class LeRobotSingleRootSource(LeRobotSource):
 
     def list_episodes(self, task: str) -> list[str]:
         idxs = self._meta()["by_task"].get(task, [])
-        # newest-first to match the other sources' ordering
-        return [self._ep_name(i) for i in sorted(idxs, reverse=True)]
+        # oldest-first (ascending episode_index) to match the other sources' ordering
+        return [self._ep_name(i) for i in sorted(idxs)]
 
     def _row(self, task: str, episode: str) -> tuple[dict, dict]:
         meta = self._meta()
