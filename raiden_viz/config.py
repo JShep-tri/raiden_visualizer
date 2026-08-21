@@ -81,6 +81,14 @@ CACHE_DIR = Path(
     or "/tmp/raiden_viz_cache"
 )
 
+# The robot teachers: the people collecting teleop data as their job, as opposed to
+# researchers recording ad-hoc episodes. The overview's Tasks card can narrow to just
+# the tasks they worked on, so "what did we actually collect for training" isn't
+# buried among one-off test tasks. Matched case-insensitively against
+# metadata.json's teacher_name. Update here as the roster changes.
+ROBOT_TEACHERS = [t.strip() for t in os.environ.get(
+    "RAIDEN_ROBOT_TEACHERS", "Fredy,Emma,Derick,Rudy").split(",") if t.strip()]
+
 HOST = os.environ.get("RAIDEN_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RAIDEN_PORT", "8080"))
 

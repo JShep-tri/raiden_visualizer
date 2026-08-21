@@ -18,6 +18,8 @@ const state = {
   detail: null,
   overviewTasks: [], // per-task rows from /overview (counts + collection span)
   taskSort: "episodes",  // Tasks-card sort: episodes | collected | name
+  taskWho: "all",        // Tasks-card filter: all | teachers (robot teachers only)
+  taskTeachers: null,    // { supported, building, tasks: {task: {teacher: {...}}}, robot_teachers }
   hoursInputs: null,     // last /stats pass, so a re-sort can refill the hours cells
   eye: "left",
   tiles: [],        // { camera, video, onReady } for each grid cell with video
@@ -119,6 +121,14 @@ async function init() {
     state.taskSort = b.dataset.sort;
     renderTaskList();
   });
+  // Tasks-card scope (All / Robot teachers) — same loaded rows, narrowed.
+  $("#ov-task-who").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button");
+    if (!b) return;
+    document.querySelectorAll("#ov-task-who button").forEach((x) => x.classList.toggle("active", x === b));
+    state.taskWho = b.dataset.who;
+    renderTaskList();
+  });
   // Episode navigation: prev/next buttons, slider scrub, and ←/→ arrow keys.
   $("#ep-prev").addEventListener("click", () => stepEpisode(-1));
   $("#ep-next").addEventListener("click", () => stepEpisode(1));
@@ -149,7 +159,9 @@ async function selectSource(sid, autoTask = null, autoEpisode = null) {
   state.source = sid;
   state.episode = null;
   state.hoursInputs = null;   // the previous dataset's per-task hours don't apply here
+  state.taskTeachers = null;  // nor its task→teacher rollup
   clearTimeout(state._catTimer);   // stop catalog polling once we enter a source
+  clearTimeout(state._taskTeacherTimer);
   document.body.classList.remove("catalog-mode");  // reveal the episode-browser sidebar
   $("#catalog-view").classList.add("hidden");
   $("#source-select").value = sid;
@@ -673,6 +685,7 @@ async function renderOverview() {
     state.overviewTasks = ov.tasks;  // per-task totals, for extrapolating hours
     state.numTasks = ov.num_tasks;
     renderTaskList();
+    loadTaskTeachers();   // reveals the robot-teacher filter when its scan is ready
     renderAnalytics(ov.tasks.map((t) => t.task));
   } catch (e) {
     toast("Failed to load overview: " + e.message);
@@ -697,17 +710,29 @@ const TASK_SORTS = {
 };
 
 function renderTaskList() {
-  const tasks = state.overviewTasks || [];
+  const all = state.overviewTasks || [];
   const list = $("#ov-task-list");
   list.innerHTML = "";
   const mode = state.taskSort || "episodes";
   // Hide the Collected sort where the format has no capture timestamps (LeRobot):
   // offering a sort that can't order anything would just look broken.
-  const anyDated = tasks.some((t) => t.collected_end);
+  const anyDated = all.some((t) => t.collected_end);
   $("#ov-task-sort").classList.toggle("hidden", !anyDated);
+  // Same for the robot-teacher filter: only shown once the teacher scan for a
+  // teacher-recording source has landed.
+  const tt = state.taskTeachers;
+  const canFilterByTeacher = !!(tt && tt.supported && !tt.building && Object.keys(tt.tasks).length);
+  $("#ov-task-who").classList.toggle("hidden", !canFilterByTeacher);
+  const teacherOnly = canFilterByTeacher && state.taskWho === "teachers";
+  const tasks = teacherOnly ? all.filter((t) => taskTeacherNames(t.task).robot.length) : all;
+
   const sorted = tasks.slice().sort(TASK_SORTS[mode] || TASK_SORTS.episodes);
-  $("#ov-task-hint").textContent = `${state.numTasks ?? tasks.length} total`;
-  const maxEp = Math.max(1, ...tasks.map((t) => t.episodes));
+  $("#ov-task-hint").textContent = teacherOnly
+    ? `${tasks.length} of ${state.numTasks ?? all.length}`
+    : `${state.numTasks ?? all.length} total`;
+  // Bar scale stays on the unfiltered max, so a task's bar means the same thing in
+  // either view instead of rescaling when you toggle.
+  const maxEp = Math.max(1, ...all.map((t) => t.episodes));
   sorted.forEach((t) => {
     const row = el("div", "ov-task-row");
     row.appendChild(el("div", "t-name", t.task));
@@ -722,13 +747,54 @@ function renderTaskList() {
     hrs.dataset.task = t.task;
     row.appendChild(hrs);
     row.appendChild(taskWhenCell(t));
+    if (canFilterByTeacher) {
+      const who = taskTeacherNames(t.task);
+      if (who.all.length) row.title = `teleoperated by ${who.all.join(", ")}`;
+    }
     row.onclick = () => selectTask(t.task);
     list.appendChild(row);
   });
+  if (teacherOnly && !sorted.length) {
+    list.appendChild(el("div", "subtle empty-note",
+      "No tasks recorded by the robot teachers in this dataset."));
+  }
   // Rows were rebuilt, so their hours cells are back to "…" — refill from the last
   // stats pass if it already landed (a re-sort must not lose them).
   const h = state.hoursInputs;
   if (h) updatePerTaskHours(h.eps, h.stats, h.estimated);
+}
+
+// Who teleoperated a task: every teacher with episodes in it (most episodes first),
+// and which of them are robot teachers. "unknown" (episodes with no teacher_name
+// recorded) is reported but never counts as a robot teacher.
+function taskTeacherNames(task) {
+  const tt = state.taskTeachers;
+  const per = (tt && tt.tasks && tt.tasks[task]) || {};
+  const roster = new Set((tt?.robot_teachers || []).map((t) => t.toLowerCase()));
+  const names = Object.keys(per).sort((a, b) => per[b].episodes - per[a].episodes);
+  return {
+    all: names.map((n) => `${n} (${per[n].episodes})`),
+    robot: names.filter((n) => roster.has(n.toLowerCase())),
+  };
+}
+
+// Which tasks each teacher worked on — an exact rollup off the same scan that feeds
+// the per-day teacher chart, so it isn't limited to the sampled stats pass. Polls
+// while that scan is building; never fatal (the filter just stays hidden).
+async function loadTaskTeachers() {
+  const forSource = state.source;
+  try {
+    const r = await api(`${apiBase()}/task-teachers`);
+    if (forSource !== state.source) return;   // switched away; drop stale result
+    state.taskTeachers = r;
+    renderTaskList();
+    if (r.supported && r.building) {
+      clearTimeout(state._taskTeacherTimer);
+      state._taskTeacherTimer = setTimeout(() => {
+        if (state.source === forSource) loadTaskTeachers();
+      }, 5000);
+    }
+  } catch (_) { /* filter stays hidden */ }
 }
 
 // The date cell: the collection span from the backend (start–end, or a single date
@@ -871,8 +937,10 @@ function updatePerTaskHours(eps, stats, estimated) {
 // read its value from an episode stat record. A facet only appears if at least one
 // scanned episode carries a non-null value for it — otherwise it renders disabled
 // as "not available for this dataset" (consistent with the metadata empty states).
+// No Task facet: a chip per task ran to 90 chips on the bigger datasets, dwarfing
+// every other facet. Pick a task from the Tasks card or the sidebar instead — each
+// result row still names its task.
 const FILTER_FACETS = [
-  { field: "task", label: "Task", kind: "enum", get: (e) => e.task },
   { field: "duration_s", label: "Duration (s)", kind: "range", get: (e) => e.duration_s },
   { field: "status", label: "Status", kind: "enum", get: (e) => e.status },
   { field: "station", label: "Station", kind: "enum", get: (e) => e.station },

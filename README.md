@@ -129,6 +129,7 @@ All dataset browsing is **source-scoped** under `/api/sources/{sid}/…`, where
 | `GET …/stats?full=` | per-episode stat records for the charts (`full=true` scans every episode; otherwise a sampled pass with coverage reported) |
 | `POST …/scan` | start (or resume) a cached background full scan of every episode's cheap stats — the data behind the episode filter — returning an immediate snapshot |
 | `GET …/scan` | progress + accumulated records of an in-flight/finished scan (404 if none started) |
+| `GET …/task-teachers` | `{task: {teacher: {episodes, seconds}}}` + the robot-teacher roster, for the Tasks card's robot-teacher filter (reuses the cached teacher scan; `supported=false` where the format records no teacher) |
 | `GET …/tasks` | task names |
 | `GET …/tasks/{task}/episodes` | episode names (oldest first, matching raiden's own 0-based recording order) |
 | `GET …/tasks/{task}/episode-facts` | `{episode: {timestamp, status}}` for the browse list; `{}` where a source has nothing cheap to report |
@@ -145,7 +146,14 @@ All dataset browsing is **source-scoped** under `/api/sources/{sid}/…`, where
   length histogram + length-vs-time scatter, an episode filter, and a per-task
   breakdown sortable by episode count, collection time (most recent first), or
   name. Each task row shows the dates it spans; the Collected sort is hidden for
-  formats whose metadata carries no capture time (LeRobot).
+  formats whose metadata carries no capture time (LeRobot). An All / Robot
+  teachers toggle narrows the list to the tasks the robot teachers teleoperated
+  (roster in `config.ROBOT_TEACHERS`, `RAIDEN_ROBOT_TEACHERS` to override); it
+  appears only for raiden-format sources, which are the ones that record a
+  `teacher_name`.
+- **Episode filter**: facets over the cheap per-episode stats. There is
+  deliberately no Task facet — one chip per task ran to 90 chips on the larger
+  datasets; pick a task from the Tasks card or the sidebar instead.
 - **Episode list** (sidebar): 0-based index, oldest first — the same numbering
   raiden records on disk (`0000`, `0001`, …), so an index here is the index there.
   Each row also shows the capture timestamp and a success/failure glyph where the

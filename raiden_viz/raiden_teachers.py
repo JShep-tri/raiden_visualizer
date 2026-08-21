@@ -27,7 +27,9 @@ _TEACHER_KINDS = {"raiden"}   # only the raiden format records teacher_name
 
 
 def _cache_key(sid: str) -> str:
-    return f"teachers_v1_{sid}.json"
+    # v2 adds the per-task rollup; bumping re-scans rather than serving a cache
+    # that predates it (the scan is the same one the day chart already pays for).
+    return f"teachers_v2_{sid}.json"
 
 
 def supports(spec: dict) -> bool:
@@ -35,16 +37,23 @@ def supports(spec: dict) -> bool:
 
 
 def build_teachers(spec: dict, src) -> dict:
-    """Scan every raiden episode's metadata → per-(day, teacher) rollup.
+    """Scan every raiden episode's metadata → per-(day, teacher) and per-(task,
+    teacher) rollups.
 
-    Returns {days: {"YYYY-MM-DD": {teacher: {episodes, seconds}}}, teachers: [...],
-    totals per teacher}. Day = capture date (metadata timestamp). Episodes missing
-    a teacher are bucketed under "unknown"; missing a timestamp are skipped from the
-    day rollup but still counted in per-teacher totals."""
+    Returns {days: {"YYYY-MM-DD": {teacher: {episodes, seconds}}}, tasks: {task:
+    {teacher: {episodes, seconds}}}, teachers: [...], totals per teacher}. Day =
+    capture date (metadata timestamp). Episodes missing a teacher are bucketed under
+    "unknown"; missing a timestamp are skipped from the day rollup but still counted
+    in the task rollup and per-teacher totals.
+
+    The task rollup rides along on this scan (which already reads every episode's
+    metadata) so the overview can narrow its Tasks card to the robot teachers'
+    tasks exactly, rather than guessing from the sampled stats pass."""
     prefix = spec["prefix"]
     bucket = spec.get("bucket")
 
     days: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: {"episodes": 0, "seconds": 0.0}))
+    tasks: dict[str, dict] = defaultdict(lambda: defaultdict(lambda: {"episodes": 0, "seconds": 0.0}))
     by_teacher: dict[str, dict] = defaultdict(lambda: {"episodes": 0, "seconds": 0.0})
     n_eps = undated = 0
 
@@ -58,6 +67,9 @@ def build_teachers(spec: dict, src) -> dict:
             dur = md.get("duration_s") or 0.0
             by_teacher[teacher]["episodes"] += 1
             by_teacher[teacher]["seconds"] += dur
+            t = tasks[task][teacher]
+            t["episodes"] += 1
+            t["seconds"] += dur
             ts = md.get("timestamp")
             if not ts or len(ts) < 10:
                 undated += 1
@@ -69,11 +81,13 @@ def build_teachers(spec: dict, src) -> dict:
 
     # Materialize defaultdicts to plain dicts for JSON.
     days_out = {day: {t: dict(v) for t, v in per.items()} for day, per in days.items()}
+    tasks_out = {task: {t: dict(v) for t, v in per.items()} for task, per in tasks.items()}
     teachers = sorted(by_teacher.keys(), key=lambda t: by_teacher[t]["episodes"], reverse=True)
     day_keys = sorted(days_out.keys())
     return {
         "id": spec["id"], "label": spec["label"], "kind": spec["kind"],
         "days": days_out,
+        "tasks": tasks_out,
         "teachers": teachers,
         "totals_by_teacher": {t: {"episodes": v["episodes"], "seconds": round(v["seconds"], 1)}
                               for t, v in by_teacher.items()},
@@ -120,7 +134,7 @@ class TeacherBuilder:
             result = build_teachers(spec, src)
         except Exception as e:
             result = {"id": sid, "label": spec.get("label", sid), "kind": spec.get("kind"),
-                      "days": {}, "teachers": [], "totals_by_teacher": {},
+                      "days": {}, "tasks": {}, "teachers": [], "totals_by_teacher": {},
                       "totals": {"episodes": 0, "undated": 0}, "span": {"first": None, "last": None},
                       "built_ok": False, "building": False, "error": str(e)}
         cache.put_json(_cache_key(sid), result)

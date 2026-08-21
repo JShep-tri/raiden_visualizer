@@ -213,6 +213,28 @@ def overview(sid: str):
     return ov
 
 
+@app.get("/api/sources/{sid}/task-teachers")
+def task_teachers(sid: str):
+    """Who teleoperated each task, for the Tasks card's robot-teacher filter:
+    {task: {teacher: {episodes, seconds}}} plus the robot-teacher roster.
+
+    Reuses the teacher scan behind the per-day chart (cached, built in the
+    background), so this is exact — every episode, not the sampled stats pass.
+    Sources whose format records no teacher return supported=false, and
+    building=true until a first scan finishes."""
+    src = _src(sid)
+    if not raiden_teachers.supports(src.spec):
+        return {"supported": False, "building": False, "tasks": {},
+                "robot_teachers": config.ROBOT_TEACHERS}
+    roll = _TEACHERS.get(sid)
+    if roll is None or roll.get("building"):
+        _TEACHERS.start(src.spec, src)
+        return {"supported": True, "building": True, "tasks": {},
+                "robot_teachers": config.ROBOT_TEACHERS}
+    return {"supported": True, "building": False, "tasks": roll.get("tasks") or {},
+            "robot_teachers": config.ROBOT_TEACHERS}
+
+
 @app.get("/api/sources/{sid}/stats")
 def stats(sid: str, full: bool = Query(False)):
     """Per-episode stat records for the charts. ``full=true`` reads every episode

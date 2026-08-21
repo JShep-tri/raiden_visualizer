@@ -156,6 +156,7 @@ select:focus { border-color: var(--accent); }
 @media (max-width: 900px) { .ov-charts { grid-template-columns: 1fr; } }
 
 .ov-task-list { padding: 6px 8px 10px; }
+.ov-task-list .empty-note { padding: 10px 12px; }
 .ov-task-row {
   display: flex; align-items: center; gap: 14px; padding: 11px 12px;
   border-radius: var(--radius-sm); cursor: pointer; transition: background 0.12s;
@@ -437,6 +438,9 @@ select:focus { border-color: var(--accent); }
 .filter-scan-btn:hover:not(:disabled) { background: rgba(110,168,254,0.24); }
 .filter-scan-btn:disabled { opacity: 0.6; cursor: default; }
 
+/* Matches the other overview cards' spacing, so the scrolling results list doesn't
+   run straight into the Tasks card below it. */
+.ov-filter-card { margin-bottom: 18px; }
 .filter-results { border-top: 1px solid var(--border-soft); max-height: 420px; overflow-y: auto; }
 .fr-row {
   display: flex; align-items: center; gap: 12px; padding: 8px 12px;
