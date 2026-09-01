@@ -4,15 +4,18 @@ Multiple dataset formats are supported via source adapters (see sources.py); the
 routes are source-scoped: /api/sources/{sid}/...
 """
 
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import catalog, config, contrib, raiden_teachers, sources
+from . import cache, catalog, config, contrib, raiden_teachers, sources
 
 app = FastAPI(title="YAM Datasets Viewer", version="0.3.0")
+
+logger = logging.getLogger("raiden_viz")
 
 _STATIC = Path(__file__).resolve().parent.parent / "static"
 _CATALOG = catalog.CatalogBuilder()
@@ -288,13 +291,26 @@ def episode_detail(sid: str, task: str, episode: str):
 
 @app.get("/api/sources/{sid}/tasks/{task}/episodes/{episode}/video")
 def episode_video(sid: str, task: str, episode: str, camera: str, eye: str = Query("left")):
-    """Decode (and cache) one camera to MP4, then stream it."""
+    """Decode (and cache) one camera to MP4, then hand it to the browser.
+
+    When the derived-artifact tier is configured the clip is served by redirecting to
+    a presigned S3 URL rather than streaming it back through the app: an episode MP4
+    is tens to hundreds of MB, and putting that on the app's critical path caps
+    concurrency at whatever the single task can push.
+    """
     try:
         mp4 = _src(sid).video_path(task, episode, camera, eye)
     except FileNotFoundError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
+    # video_path() has already published the clip via cache.get_or_create, so a URL
+    # here is the common case once the tier is on. Key off the file NAME: that is the
+    # cache key, and it does not match camera/eye for every adapter (the lerobot one
+    # folds a time window into it).
+    url = cache.remote_url(mp4.name)
+    if url:
+        return RedirectResponse(url, status_code=302)
     return FileResponse(mp4, media_type="video/mp4", filename=f"{camera}_{eye}.mp4")
 
 
@@ -315,7 +331,14 @@ def episode_calib(sid: str, task: str, episode: str, camera: str):
 
 @app.exception_handler(Exception)
 async def _unhandled(_request, exc: Exception):
-    return JSONResponse(status_code=500, content={"error": str(exc)})
+    """Log the detail, return a generic body.
+
+    str(exc) on an unhandled error puts bucket names, key prefixes and AWS principals
+    in front of whoever typed the URL -- and the app has no authentication, so that
+    audience is everyone on the network.
+    """
+    logger.exception("unhandled error", exc_info=exc)
+    return JSONResponse(status_code=500, content={"error": "internal server error"})
 
 
 # Serve the frontend at the root. Mounted last so /api/* wins.
