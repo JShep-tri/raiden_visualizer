@@ -62,6 +62,15 @@ SOURCES = [
      "bucket": S3_BUCKET, "prefix": "yam_public/MolmoAct2-BimanualYAM"},
 ]
 
+# Sources to drop entirely at startup, by id. A deployed container cannot reach a
+# source that depends on a local SSO profile (see BUCKET_PROFILES): get_sources()
+# would filter it anyway, but only after a live S3 probe against a bucket the task
+# role has no path to, on every /api/sources call. Naming it here skips that.
+DISABLED_SOURCES = {
+    s.strip() for s in os.environ.get("RAIDEN_DISABLED_SOURCES", "").split(",") if s.strip()
+}
+SOURCES = [_s for _s in SOURCES if _s["id"] not in DISABLED_SOURCES]
+
 # Buckets that require a specific AWS profile (SSO) rather than the default
 # credentials/instance-role. The xdof vendor bucket is granted to the
 # Robotics-LBM-PowerUserAccess role in acct 682769330988 (the 'manip-cluster'
