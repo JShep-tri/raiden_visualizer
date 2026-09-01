@@ -31,9 +31,115 @@ def path_for(name: str) -> Path:
     return config.CACHE_DIR / name
 
 
+# --- durable (remote) tier -------------------------------------------------
+# A decoded clip costs a 200-880 MB download plus an ffmpeg pass to produce, and the
+# local CACHE_DIR is per-host: it dies on every container redeploy and is not shared
+# between tasks. Publishing derivatives to S3 makes that work permanent. Everything
+# below no-ops when config.DERIVED_BUCKET is empty.
+
+_derived: dict[str, object] = {}
+
+
+def _derived_client():
+    """boto3 client for the derived-artifact bucket, created lazily and cached."""
+    if "c" not in _derived:
+        import boto3
+
+        _derived["c"] = boto3.client("s3", region_name=config.AWS_REGION)
+    return _derived["c"]
+
+
+def remote_enabled() -> bool:
+    return bool(config.DERIVED_BUCKET)
+
+
+def _remote_key(cache_name: str) -> str:
+    return f"{config.DERIVED_PREFIX}/{cache_name}" if config.DERIVED_PREFIX else cache_name
+
+
+def _remote_head(cache_name: str) -> bool:
+    if not remote_enabled():
+        return False
+    try:
+        _derived_client().head_object(
+            Bucket=config.DERIVED_BUCKET, Key=_remote_key(cache_name)
+        )
+        return True
+    except Exception:
+        return False
+
+
+def fetch_remote(cache_name: str, dest: Path) -> bool:
+    """Download a previously-derived artifact into ``dest``. False on any miss.
+
+    Downloads to a unique temp name and moves it into place, so a failed or partial
+    transfer can never be served as a complete file.
+    """
+    if not remote_enabled():
+        return False
+    tmp = dest.with_suffix(dest.suffix + f".rtmp{os.getpid()}_{int(time.time()*1000)%100000}")
+    try:
+        _derived_client().download_file(
+            Bucket=config.DERIVED_BUCKET, Key=_remote_key(cache_name), Filename=str(tmp)
+        )
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        return False
+    tmp.replace(dest)
+    return True
+
+
+def push_remote(cache_name: str, src: Path) -> None:
+    """Best-effort upload. Caching is an optimisation, so a failure here must never
+    fail the request that produced the artifact."""
+    if not remote_enabled():
+        return
+    try:
+        _derived_client().upload_file(
+            Filename=str(src), Bucket=config.DERIVED_BUCKET, Key=_remote_key(cache_name)
+        )
+    except Exception:
+        pass
+
+
+def exists(cache_name: str) -> bool:
+    """True if the artifact is available locally, pulling it from the derived tier
+    if that is where it lives.
+
+    Use this instead of ``path_for(name).exists()``: a bare local probe reports a
+    miss for something the derived tier already holds, and the YAM adapter answers
+    that miss by re-downloading a whole 200-880 MB MCAP.
+    """
+    dest = path_for(cache_name)
+    if dest.exists() and dest.stat().st_size > 0:
+        dest.touch()
+        return True
+    return fetch_remote(cache_name, dest)
+
+
+def remote_url(cache_name: str) -> str | None:
+    """Presigned GET for a derived artifact, or None if the tier is off or empty.
+
+    Lets a caller hand the bytes straight to the browser instead of streaming them
+    back through the app.
+    """
+    if not _remote_head(cache_name):
+        return None
+    return _derived_client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": config.DERIVED_BUCKET, "Key": _remote_key(cache_name)},
+        ExpiresIn=config.DERIVED_URL_TTL,
+    )
+
+
 def get_or_create(cache_name: str, produce) -> Path:
     """Return cached file at ``cache_name``, invoking ``produce(path)`` to
-    build it on a miss. ``produce`` must write the file at the given path."""
+    build it on a miss. ``produce`` must write the file at the given path.
+
+    Three tiers, cheapest first: local disk, the derived S3 bucket, then an actual
+    decode. A fresh decode is published to the derived tier so the next container --
+    or the next deploy -- skips it entirely.
+    """
     dest = path_for(cache_name)
     if dest.exists() and dest.stat().st_size > 0:
         dest.touch()  # bump mtime for LRU
@@ -44,11 +150,17 @@ def get_or_create(cache_name: str, produce) -> Path:
         # Re-check inside the lock (another thread may have produced it).
         if dest.exists() and dest.stat().st_size > 0:
             return dest
+        # Remote tier before decoding: a download is minutes cheaper than an ffmpeg
+        # pass over an 880 MB MCAP, and survives redeploys.
+        if fetch_remote(cache_name, dest):
+            _maybe_evict()
+            return dest
         # Unique temp name (pid + time) so concurrent cold misses never clobber
         # each other's partial writes before the atomic replace below.
         tmp = dest.with_suffix(dest.suffix + f".tmp{os.getpid()}_{int(time.time()*1000)%100000}")
         produce(tmp)
         tmp.replace(dest)
+        push_remote(cache_name, dest)
     _maybe_evict()
     return dest
 
