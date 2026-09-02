@@ -62,6 +62,15 @@ SOURCES = [
      "bucket": S3_BUCKET, "prefix": "yam_public/MolmoAct2-BimanualYAM"},
 ]
 
+# Sources to drop entirely at startup, by id. A deployed container cannot reach a
+# source that depends on a local SSO profile (see BUCKET_PROFILES): get_sources()
+# would filter it anyway, but only after a live S3 probe against a bucket the task
+# role has no path to, on every /api/sources call. Naming it here skips that.
+DISABLED_SOURCES = {
+    s.strip() for s in os.environ.get("RAIDEN_DISABLED_SOURCES", "").split(",") if s.strip()
+}
+SOURCES = [_s for _s in SOURCES if _s["id"] not in DISABLED_SOURCES]
+
 # Buckets that require a specific AWS profile (SSO) rather than the default
 # credentials/instance-role. The xdof vendor bucket is granted to the
 # Robotics-LBM-PowerUserAccess role in acct 682769330988 (the 'manip-cluster'
@@ -96,5 +105,16 @@ PORT = int(os.environ.get("RAIDEN_PORT", "8080"))
 # Kept modest by default: the deploy host's disk is shared with other work, so
 # the cache must stay bounded well under free space.
 CACHE_MAX_GB = float(os.environ.get("RAIDEN_CACHE_MAX_GB", "8"))
+
+# Durable second cache tier. Decoding an episode costs a 200-880 MB S3 download plus
+# an ffmpeg pass, so the result is worth keeping somewhere that outlives the host:
+# the local CACHE_DIR is per-container and dies on every redeploy. Empty bucket =
+# tier disabled = exactly the pre-existing local-only behaviour, which is what keeps
+# a laptop checkout and the aws-anthony-1 box working unchanged.
+DERIVED_BUCKET = os.environ.get("RAIDEN_DERIVED_BUCKET", "")
+DERIVED_PREFIX = os.environ.get("RAIDEN_DERIVED_PREFIX", "derived").strip("/")
+# Presigned-URL lifetime. Long enough to scrub through a clip, short enough that a
+# copied link is not a durable handle to dataset content.
+DERIVED_URL_TTL = int(os.environ.get("RAIDEN_DERIVED_URL_TTL", "3600"))
 
 CACHE_DIR.mkdir(parents=True, exist_ok=True)

@@ -87,6 +87,18 @@ and [`uv`](https://github.com/astral-sh/uv). LeRobot sources also need `pyarrow`
 RAIDEN_PORT=9000 ./run.sh     # custom port
 ```
 
+### In a container
+
+```bash
+docker build -t yam-data-visualizer .
+docker run --rm -p 8080:8080 \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN \
+  yam-data-visualizer
+```
+
+`ffmpeg`/`ffprobe` are baked in. The container runs as a non-root user with the
+decode cache at `/cache`; mount a volume there to keep it across restarts.
+
 Then open `http://<host-ip>:8080/`. Links are shareable via the URL hash
 (`#<source>/<task>/<episode>`); the bare root shows the catalog.
 

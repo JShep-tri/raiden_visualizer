@@ -516,7 +516,7 @@ class YamMcapSource(Source):
             ex = json.loads(meta_json.read_text())
             # Ensure the per-camera MP4s exist too (a partial prior run may have
             # written meta but not videos).
-            if all(cache.path_for(f"yam_{obj.etag}_{c}.mp4").exists() for c in ex["cameras"]):
+            if all(cache.exists(f"yam_{obj.etag}_{c}.mp4") for c in ex["cameras"]):
                 return ex
 
         # Make room for the big MCAP + its extracted MP4s before downloading, so
@@ -528,8 +528,7 @@ class YamMcapSource(Source):
             probe = yam.probe(tmp)
             # Extract every camera to a cached MP4 in this single pass.
             for cam in probe["cameras"]:
-                mp4 = cache.path_for(f"yam_{obj.etag}_{cam}.mp4")
-                if not mp4.exists():
+                if not cache.exists(f"yam_{obj.etag}_{cam}.mp4"):
                     cache.get_or_create(
                         f"yam_{obj.etag}_{cam}.mp4",
                         lambda dst, _c=cam: yam.extract_camera_mp4(tmp, _c, dst),
@@ -600,11 +599,15 @@ class YamMcapSource(Source):
     def video_path(self, task, episode, camera, eye):
         obj = self._head(task, episode)
         mp4 = cache.path_for(f"yam_{obj.etag}_{camera}.mp4")
-        if not mp4.exists():
+        # cache.exists() consults the derived S3 tier and pulls the clip down if it
+        # is there. A bare local probe would report a miss for something already
+        # decoded, and _mine answers a miss by re-downloading the whole 200-880 MB
+        # MCAP — the single most expensive thing this app can do.
+        if not cache.exists(f"yam_{obj.etag}_{camera}.mp4"):
             # Mining extracts all cameras at once (single MCAP download), then
             # drops the MCAP — so this only downloads on a true cold miss.
             self._mine(obj, task, episode)
-        if not mp4.exists():
+        if not cache.exists(f"yam_{obj.etag}_{camera}.mp4"):
             raise FileNotFoundError(f"camera {camera!r} not found in {task}/{episode}")
         return mp4
 
