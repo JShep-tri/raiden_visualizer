@@ -215,6 +215,21 @@ const CAT_KIND_LABEL = {
   lerobot_single: "LeRobot v3.0",
 };
 
+// Minimal HTML escape — card templates go through innerHTML, and a card's error
+// string is server-supplied text (an S3 /botocore message), not markup.
+function esc(v) {
+  return String(v ?? "").replace(/[&<>"']/g, (ch) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]
+  ));
+}
+
+// A card whose deep build threw. Without this the card is indistinguishable from a
+// slow one: both render blank metrics, so a real failure looks like patience.
+function failBadge(msg) {
+  const short = String(msg ?? "build failed");
+  return `<span class="cat-badge failed" title="${esc(short)}">⚠ build failed</span>`;
+}
+
 function annBadge(a) {
   const map = {
     yes: ["ann-yes", "✓ annotations"],
@@ -250,6 +265,7 @@ async function renderCatalog() {
     card.className = "cat-card";
     const fmt = CAT_KIND_LABEL[c.kind] || c.kind || "";
     const building = c.building;
+    const failed = c.built_ok === false;
     const hours = c.total_hours != null ? `${c.total_hours} h` : (building ? "…" : "—");
     const cams = (c.cameras && c.cameras.length) ? c.cameras.join(", ") : (building ? "…" : "—");
     card.innerHTML = `
@@ -262,9 +278,11 @@ async function renderCatalog() {
         <div><b>${c.num_tasks ?? "—"}</b><span>tasks</span></div>
         <div><b>${hours}</b><span>duration</span></div>
       </div>
-      <div class="cat-row">${building ? '<span class="cat-badge building">⟳ computing…</span>' : annBadge(c.annotations)}</div>
+      <div class="cat-row">${building
+        ? '<span class="cat-badge building">⟳ computing…</span>'
+        : failed ? failBadge(c.error) : annBadge(c.annotations)}</div>
       <div class="cat-cams subtle mono">${cams}</div>
-      <div class="cat-prefix subtle mono">s3://${c.bucket}/${c.prefix}</div>`;
+      ${c.bucket ? `<div class="cat-prefix subtle mono">s3://${esc(c.bucket)}/${esc(c.prefix ?? "")}</div>` : ""}`;
     card.addEventListener("click", () => selectSource(c.id));
     grid.appendChild(card);
   });

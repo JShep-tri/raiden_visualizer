@@ -19,10 +19,13 @@ cache.put_json so they survive a restart.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
 from . import cache
+
+log = logging.getLogger(__name__)
 
 # Which source formats CAN carry subtask annotations at all (probe only these;
 # for others we can state "not supported" without reading anything).
@@ -30,6 +33,13 @@ _ANNOTATABLE_KINDS = {"yam", "lerobot", "lerobot_single"}
 
 # How many episodes to sample-probe per source when checking for annotations.
 _ANNOTATION_PROBE_N = 8
+
+# How long a FAILED card is left alone before start_deep will retry it. A failure
+# is usually transient (a missing cross-account grant that later lands, a throttle),
+# so a failed card must not be permanent — but the frontend refetches /api/catalog
+# every 4s while anything is building, so retrying on every poll would hammer S3
+# for as long as the failure lasts.
+_RETRY_COOLDOWN_S = 60
 
 # Disk-cache key for a source's deep summary, versioned so a schema change
 # invalidates old blobs.
@@ -176,24 +186,41 @@ class CatalogBuilder:
                 "built_ok": True, "building": False,
             }
         except Exception as e:  # a failed build must not wedge the card forever
+            # LOG it. The card carries the message, but nothing renders a card's
+            # error, so without this line a dead build is invisible in the app logs
+            # and the dashboard just looks empty.
+            log.exception("catalog: deep build failed for %s", sid)
+            # Keep bucket/prefix: they come from the spec, not from the scan that
+            # failed, and the card footer renders them. Without them the UI shows
+            # "s3://undefined/undefined". getattr-guarded so a broken source object
+            # cannot make the error handler itself throw.
             deep = {"id": sid, "label": src.spec.get("label", sid),
-                    "kind": src.spec.get("kind"), "built_ok": False,
-                    "building": False, "error": str(e)}
+                    "kind": src.spec.get("kind"),
+                    "bucket": getattr(src, "bucket", None),
+                    "prefix": getattr(src, "prefix", None),
+                    "built_ok": False, "building": False,
+                    "error": str(e), "failed_at": time.time()}
         cache.put_json(_cache_key(sid), deep)
         with self._lock:
             self._deep[sid] = deep
             self._running[sid] = False
 
     def start_deep(self, sid: str, src, force: bool = False) -> None:
-        """Kick off build_deep in a daemon thread. Skips if already running, or if
-        a FINISHED card is cached (unless ``force``). A phase-1 (building=true) card
-        with no running thread — e.g. left over from a restart mid-build — is
-        (re)started so it completes."""
+        """Kick off build_deep in a daemon thread. Skips if already running, or if a
+        finished-and-SUCCESSFUL card is cached (unless ``force``). A phase-1
+        (building=true) card with no running thread — e.g. left over from a restart
+        mid-build — is (re)started so it completes, and a FAILED card is retried once
+        its cooldown has elapsed so a transient error does not wedge it forever."""
         if self.is_running(sid):
             return
         card = self.get_card(sid)
         if not force and card is not None and not card.get("building"):
-            return
+            if card.get("built_ok"):
+                return                      # finished and good — nothing to do
+            # FAILED card. Retry it, but not more often than the cooldown. A card
+            # cached with no failed_at (an older schema) retries immediately.
+            if time.time() - (card.get("failed_at") or 0) < _RETRY_COOLDOWN_S:
+                return
         t = threading.Thread(target=self.build_deep, args=(sid, src), daemon=True)
         t.start()
 

@@ -488,6 +488,7 @@ select:focus { border-color: var(--accent); }
 .cat-badge.ann-none { background: var(--bg-elev); color: var(--text-dim); border: 1px solid var(--border); }
 .cat-badge.ann-na { background: var(--bg-elev); color: var(--text-faint); border: 1px solid var(--border-soft); }
 .cat-badge.building { background: var(--accent-soft); color: var(--accent); }
+.cat-badge.failed { background: rgba(248,113,113,0.14); color: var(--bad); cursor: help; }
 .cat-cams { font-size: 11px; margin-bottom: 6px; }
 .cat-prefix { font-size: 10.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
