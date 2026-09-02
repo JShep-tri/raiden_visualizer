@@ -21,6 +21,15 @@ class S3Object:
 # are only readable via a specific SSO profile, configured in config.BUCKET_PROFILES.
 _clients: dict[str, object] = {}
 
+# Connection-pool size. botocore defaults to 10, which starves the stat scans badly:
+# stats()/scan use ThreadPoolExecutor(max_workers=32), the catalog builds every
+# source concurrently, and clients are cached per BUCKET — so all sources sharing
+# one bucket share one client. Peak demand is therefore 32 x (sources on that
+# bucket), ~256 today. At the default 10 the surplus threads queue and urllib3
+# discards connections, paying a fresh TLS handshake per retry — brutal when the
+# bucket is cross-region from the task (us-west-2 vs us-east-1).
+_MAX_POOL_CONNECTIONS = 64
+
 
 def _client(bucket: str | None = None):
     b = _bucket(bucket)
@@ -30,7 +39,10 @@ def _client(bucket: str | None = None):
         _clients[b] = session.client(
             "s3",
             region_name=config.AWS_REGION,
-            config=Config(retries={"max_attempts": 3, "mode": "standard"}),
+            config=Config(
+                retries={"max_attempts": 3, "mode": "standard"},
+                max_pool_connections=_MAX_POOL_CONNECTIONS,
+            ),
         )
     return _clients[b]
 
