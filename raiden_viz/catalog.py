@@ -41,6 +41,13 @@ _ANNOTATION_PROBE_N = 8
 # for as long as the failure lasts.
 _RETRY_COOLDOWN_S = 60
 
+# How long a SUCCESSFUL card is served before a background refresh is kicked off.
+# Cards persist in the derived tier now, so without a TTL a card built once would
+# be served forever and never pick up newly uploaded episodes. A stale card keeps
+# being served while the refresh runs — see build_deep — so this costs nothing
+# visible.
+_CARD_TTL_S = 6 * 3600
+
 # Disk-cache key for a source's deep summary, versioned so a schema change
 # invalidates old blobs.
 def _cache_key(sid: str) -> str:
@@ -118,7 +125,10 @@ class CatalogBuilder:
         self._running: dict[str, bool] = {}
 
     def _load_cached(self, sid: str) -> dict | None:
-        return cache.get_json(_cache_key(sid))
+        # remote=True: cards are worth surviving a container. CACHE_DIR dies with
+        # the task, and rebuilding a card means a full S3 scan — so without this a
+        # deploy (or any task replacement) makes the first visitor wait for it.
+        return cache.get_json(_cache_key(sid), remote=True)
 
     def get_card(self, sid: str) -> dict | None:
         """Cached card for a source (memory, then disk), or None if never built.
@@ -147,16 +157,25 @@ class CatalogBuilder:
             if self._running.get(sid):
                 return
             self._running[sid] = True
+        # A REFRESH — a good card is already cached and we are only re-scanning to
+        # pick up new episodes — must not blank the dashboard. Keep serving the
+        # existing card and swap the new one in at the end; only a FIRST build
+        # publishes the phase-1 placeholder.
+        prior = self.get_card(sid)
+        refreshing = bool(prior and prior.get("built_ok"))
         try:
             # Phase 1 — cheap facts (task/episode counts from overview()). Still an
             # S3 listing pass, but far cheaper than the full stat scan. Cache it
             # immediately (building=true) so the card shows counts within seconds
             # while the deep stats compute.
             cheap = cheap_card(src.spec, src)
-            phase1 = {**cheap, "building": True}
-            cache.put_json(_cache_key(sid), phase1)
-            with self._lock:
-                self._deep[sid] = phase1
+            if not refreshing:
+                # Local only: a placeholder is not worth a round trip, and must
+                # never be what a later restart loads from the derived tier.
+                phase1 = {**cheap, "building": True}
+                cache.put_json(_cache_key(sid), phase1)
+                with self._lock:
+                    self._deep[sid] = phase1
             # Phase 2 — full stats: reuse the source's own scan machinery. stats(full)
             # reads every episode's cheap record (duration/frames/cameras/etc).
             st = src.stats(full=True)
@@ -184,6 +203,7 @@ class CatalogBuilder:
                 "duration_avg_s": round(sum(durs) / len(durs), 1) if durs else None,
                 "top_tasks": [{"task": t, "episodes": n} for t, n in top_tasks],
                 "built_ok": True, "building": False,
+                "built_at": time.time(),
             }
         except Exception as e:  # a failed build must not wedge the card forever
             # LOG it. The card carries the message, but nothing renders a card's
@@ -200,10 +220,18 @@ class CatalogBuilder:
                     "prefix": getattr(src, "prefix", None),
                     "built_ok": False, "building": False,
                     "error": str(e), "failed_at": time.time()}
-        cache.put_json(_cache_key(sid), deep)
-        with self._lock:
-            self._deep[sid] = deep
-            self._running[sid] = False
+        try:
+            # Only a SUCCESSFUL card earns a place in the derived tier: a restart
+            # must never inherit another container's failure, and the retry path in
+            # start_deep already handles recovery within a process.
+            cache.put_json(_cache_key(sid), deep, remote=bool(deep.get("built_ok")))
+            with self._lock:
+                self._deep[sid] = deep
+        finally:
+            # Always release, or a card whose publish failed would report
+            # is_running() forever and never be rebuilt.
+            with self._lock:
+                self._running[sid] = False
 
     def start_deep(self, sid: str, src, force: bool = False) -> None:
         """Kick off build_deep in a daemon thread. Skips if already running, or if a
@@ -216,10 +244,15 @@ class CatalogBuilder:
         card = self.get_card(sid)
         if not force and card is not None and not card.get("building"):
             if card.get("built_ok"):
-                return                      # finished and good — nothing to do
+                # Good card. Serve it as-is until it goes stale, then refresh in the
+                # background. A card with no built_at (an older schema, or one
+                # restored from the derived tier before this field existed) reads as
+                # infinitely old and refreshes once, which is what we want.
+                if time.time() - (card.get("built_at") or 0) < _CARD_TTL_S:
+                    return
             # FAILED card. Retry it, but not more often than the cooldown. A card
             # cached with no failed_at (an older schema) retries immediately.
-            if time.time() - (card.get("failed_at") or 0) < _RETRY_COOLDOWN_S:
+            elif time.time() - (card.get("failed_at") or 0) < _RETRY_COOLDOWN_S:
                 return
         t = threading.Thread(target=self.build_deep, args=(sid, src), daemon=True)
         t.start()

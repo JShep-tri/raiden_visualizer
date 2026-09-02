@@ -117,4 +117,14 @@ DERIVED_PREFIX = os.environ.get("RAIDEN_DERIVED_PREFIX", "derived").strip("/")
 # copied link is not a durable handle to dataset content.
 DERIVED_URL_TTL = int(os.environ.get("RAIDEN_DERIVED_URL_TTL", "3600"))
 
+# Build the catalog cards at STARTUP rather than on the first request. Nothing else
+# touches /api/catalog — the load balancer only polls /api/health — so without this
+# the cold-cache scan is paid by whoever opens the dashboard first, which in a
+# deployed environment is a colleague rather than the person who deployed. Set
+# RAIDEN_WARM_CATALOG=0 for a laptop checkout, where scanning every source on
+# import is not what you want.
+WARM_CATALOG_ON_START = os.environ.get("RAIDEN_WARM_CATALOG", "1").strip().lower() not in (
+    "0", "false", "no", "",
+)
+
 CACHE_DIR.mkdir(parents=True, exist_ok=True)

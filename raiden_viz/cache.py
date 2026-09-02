@@ -165,10 +165,8 @@ def get_or_create(cache_name: str, produce) -> Path:
     return dest
 
 
-def get_json(cache_name: str) -> dict | None:
-    """Read a small cached JSON blob (e.g. a per-episode stat record), or None on
-    miss/corruption. Bumps mtime so the LRU keeps hot records."""
-    dest = path_for(cache_name)
+def _read_json(dest: Path) -> dict | None:
+    """Local read, bumping mtime so the LRU keeps hot records. None on miss/corruption."""
     try:
         if dest.exists() and dest.stat().st_size > 0:
             dest.touch()
@@ -178,16 +176,40 @@ def get_json(cache_name: str) -> dict | None:
     return None
 
 
-def put_json(cache_name: str, value: dict) -> None:
+def get_json(cache_name: str, remote: bool = False) -> dict | None:
+    """Read a small cached JSON blob (e.g. a per-episode stat record), or None on
+    miss/corruption.
+
+    ``remote`` opts this blob into the derived tier, for the few blobs worth
+    surviving a container. CACHE_DIR is task-local and dies with the task, so a
+    local-only blob is recomputed on every deploy and every unplanned restart. Pass
+    it for blobs that are cheap to store and expensive to recompute (the catalog
+    cards); leave it off for the high-volume per-episode stat records, where the
+    round trips would cost more than the recompute.
+    """
+    dest = path_for(cache_name)
+    d = _read_json(dest)
+    if d is not None:
+        return d
+    # Local miss — fall back to the derived tier and re-seed the local copy, so
+    # only the first read after a restart pays for the download.
+    if remote and fetch_remote(cache_name, dest):
+        return _read_json(dest)
+    return None
+
+
+def put_json(cache_name: str, value: dict, remote: bool = False) -> None:
     """Write a small JSON blob atomically. Best-effort: caching a stat record must
-    never break the request that produced it."""
+    never break the request that produced it. See get_json for ``remote``."""
     dest = path_for(cache_name)
     try:
         tmp = dest.with_suffix(dest.suffix + f".tmp{os.getpid()}_{int(time.time()*1000)%100000}")
         tmp.write_text(json.dumps(value))
         tmp.replace(dest)
     except OSError:
-        pass
+        return          # nothing on disk to push
+    if remote:
+        push_remote(cache_name, dest)
 
 
 def evict(headroom_gb: float = 0.0) -> None:
