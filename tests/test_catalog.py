@@ -323,3 +323,91 @@ def test_warmup_can_be_disabled(monkeypatch):
     with TestClient(app_module.app):
         pass
     assert calls == [1]
+
+
+# --- through the ENDPOINT, not the builder --------------------------------
+#
+# The builder tests above all call start_deep directly, which is exactly why they
+# passed while /api/catalog was gating the call away: `get_catalog` only invoked
+# start_deep for a MISSING or BUILDING card, so a failed card (building=false) was
+# served forever and a stale card never refreshed. Drive the route.
+
+
+@pytest.fixture
+def catalog_app(monkeypatch, cache_dir):
+    """The app wired to a fresh builder and one fake source."""
+    from fastapi.testclient import TestClient
+
+    from raiden_viz import app as app_module
+    from raiden_viz import catalog as catalog_mod
+    from raiden_viz import sources
+
+    monkeypatch.setattr(catalog_mod.threading, "Thread", _ImmediateThread)
+    builder = catalog_mod.CatalogBuilder()
+    monkeypatch.setattr(app_module, "_CATALOG", builder)
+    monkeypatch.setattr(app_module.config, "SOURCES", [{"id": "s1", "label": "Fake", "kind": "yam"}])
+    monkeypatch.setattr(sources, "get_sources", lambda _s: {"s1": FakeSource()})
+    # No context manager: lifespan (and therefore warmup) deliberately does not run,
+    # so these tests exercise the request path alone.
+    return TestClient(app_module.app), builder
+
+
+def test_endpoint_retries_a_failed_card(catalog_app):
+    """The prod regression: cards failed before a cross-account grant landed, and no
+    page load ever rebuilt them."""
+    client, builder = catalog_app
+    builder.build_deep("s1", FakeSource(fail=True))
+    assert builder.get_card("s1")["built_ok"] is False
+
+    aged = dict(builder.get_card("s1"))
+    aged["failed_at"] = time.time() - (catalog._RETRY_COOLDOWN_S + 1)
+    builder._deep["s1"] = aged
+
+    assert client.get("/api/catalog").status_code == 200
+    assert builder.get_card("s1")["built_ok"] is True, "endpoint did not retry the failed card"
+
+    # And the next request serves the rebuilt card.
+    card = client.get("/api/catalog").json()["datasets"][0]
+    assert card["built_ok"] is True
+    assert card["num_episodes"] == 7
+
+
+def test_endpoint_does_not_retry_inside_the_cooldown(catalog_app):
+    client, builder = catalog_app
+    builder.build_deep("s1", FakeSource(fail=True))
+    first = builder.get_card("s1")["failed_at"]
+
+    assert client.get("/api/catalog").status_code == 200
+    assert builder.get_card("s1")["built_ok"] is False
+    assert builder.get_card("s1")["failed_at"] == first, "retried inside the cooldown"
+
+
+def test_endpoint_refreshes_a_stale_card(catalog_app):
+    """Cards persist in the derived tier now, so without this they would be served
+    forever and never pick up newly uploaded episodes."""
+    client, builder = catalog_app
+    builder.build_deep("s1", FakeSource())
+    aged = dict(builder.get_card("s1"))
+    aged["built_at"] = time.time() - (catalog._CARD_TTL_S + 1)
+    builder._deep["s1"] = aged
+
+    assert client.get("/api/catalog").status_code == 200
+    assert builder.get_card("s1")["built_at"] > aged["built_at"], "stale card never refreshed"
+
+
+def test_endpoint_leaves_a_fresh_card_alone(catalog_app):
+    client, builder = catalog_app
+    builder.build_deep("s1", FakeSource())
+    before = builder.get_card("s1")["built_at"]
+
+    assert client.get("/api/catalog").status_code == 200
+    assert builder.get_card("s1")["built_at"] == before, "rebuilt a fresh card"
+
+
+def test_endpoint_serves_a_stub_and_starts_a_first_build(catalog_app):
+    client, builder = catalog_app
+    assert builder.get_card("s1") is None
+
+    data = client.get("/api/catalog").json()
+    assert data["datasets"][0]["label"] == "Fake"
+    assert builder.get_card("s1")["built_ok"] is True, "first build never started"

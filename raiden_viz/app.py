@@ -78,8 +78,8 @@ def health():
 def get_catalog():
     """Landing-page data: one summary card per readable dataset + cross-dataset
     aggregates. NEVER computes inline (even task/episode counts hit S3 hard across
-    227k+ episodes) — it serves cards from the on-disk cache and kicks off any
-    missing/stale ones in the background. An uncached card returns building=true
+    227k+ episodes) — it serves cards from cache and kicks off any missing, stale or
+    previously-FAILED one in the background (start_deep throttles the retries). An uncached card returns building=true
     with just id/label/kind; the frontend polls until every card is ready. This
     keeps the landing page instant regardless of dataset size."""
     available = sources.get_sources(config.SOURCES)
@@ -89,15 +89,19 @@ def get_catalog():
             continue  # access-gated + unreadable here
         src = available[spec["id"]]
         card = _CATALOG.get_card(spec["id"])
-        if card is not None and not card.get("building"):
-            # Overlay the LIVE label/kind from config so a rename shows immediately
-            # without wiping the (label-frozen) deep-summary cache.
-            cards.append({**card, "label": spec["label"], "kind": spec["kind"]})
-        else:
-            _CATALOG.start_deep(spec["id"], src)    # (re)build in background
-            # serve the phase-1 card if we have it (counts), else a bare stub
-            base = card or {"id": spec["id"], "building": True}
-            cards.append({**base, "label": spec["label"], "kind": spec["kind"]})
+        # start_deep owns EVERY skip decision — already running, finished and still
+        # fresh, failed but inside its cooldown — so call it unconditionally and let
+        # it no-op. Gating it on `building` here was a bug that made two recovery
+        # paths unreachable: a FAILED card has building=false, so it was served
+        # forever and never retried (and the frontend stops polling once nothing is
+        # building, so it never re-asked either), and a good-but-stale card is also
+        # building=false, which made the TTL refresh dead code.
+        _CATALOG.start_deep(spec["id"], src)
+        # Serve whatever is cached — a finished card, a phase-1 card with counts, or
+        # a bare stub on a first build. Overlay the LIVE label/kind from config so a
+        # rename shows immediately without wiping the (label-frozen) deep cache.
+        base = card or {"id": spec["id"], "building": True}
+        cards.append({**base, "label": spec["label"], "kind": spec["kind"]})
     agg = {
         "num_datasets": len(cards),
         "total_episodes": sum(c.get("num_episodes") or 0 for c in cards),
