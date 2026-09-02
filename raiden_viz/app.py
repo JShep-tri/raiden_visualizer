@@ -38,8 +38,29 @@ def _warm_catalog() -> None:
         logger.exception("catalog warmup failed")
 
 
+def _configure_logging() -> None:
+    """Give the raiden_viz loggers a handler.
+
+    Nothing else configures logging in this app, so the logger has no handlers and
+    Python's lastResort fallback applies — WARNING and above only. logger.exception
+    therefore reached CloudWatch, but every INFO line was silently dropped, which is
+    a poor trade in a container whose only window is its logs.
+
+    Configured on the `raiden_viz` logger rather than the root logger so uvicorn's
+    own handlers are left alone, and called from the lifespan rather than at import
+    so merely importing this module mutates no global logging state.
+    """
+    log = logging.getLogger("raiden_viz")
+    log.setLevel(config.LOG_LEVEL)
+    if not log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+        log.addHandler(handler)
+
+
 @asynccontextmanager
 async def _lifespan(_app):
+    _configure_logging()          # before the warmup, so its log line is visible
     if config.WARM_CATALOG_ON_START:
         _warm_catalog()
     yield

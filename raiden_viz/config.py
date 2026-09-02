@@ -123,6 +123,12 @@ DERIVED_URL_TTL = int(os.environ.get("RAIDEN_DERIVED_URL_TTL", "3600"))
 # deployed environment is a colleague rather than the person who deployed. Set
 # RAIDEN_WARM_CATALOG=0 for a laptop checkout, where scanning every source on
 # import is not what you want.
+# Log level for the raiden_viz loggers. Nothing else configures logging, so without
+# app.py's _configure_logging the logger has no handler at all and Python's
+# lastResort fallback emits WARNING and above only — which silently dropped every
+# INFO line, including the catalog warmup confirmation.
+LOG_LEVEL = os.environ.get("RAIDEN_LOG_LEVEL", "INFO").strip().upper()
+
 WARM_CATALOG_ON_START = os.environ.get("RAIDEN_WARM_CATALOG", "1").strip().lower() not in (
     "0", "false", "no", "",
 )

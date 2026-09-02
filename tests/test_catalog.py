@@ -411,3 +411,51 @@ def test_endpoint_serves_a_stub_and_starts_a_first_build(catalog_app):
     data = client.get("/api/catalog").json()
     assert data["datasets"][0]["label"] == "Fake"
     assert builder.get_card("s1")["built_ok"] is True, "first build never started"
+
+
+# --- logging is actually configured --------------------------------------
+
+
+def test_configure_logging_lets_INFO_through(monkeypatch):
+    """Without this the raiden_viz logger has no handler, so Python's lastResort
+    fallback drops everything below WARNING — which silently swallowed the catalog
+    warmup confirmation while letting logger.exception through."""
+    import logging
+
+    from raiden_viz import app as app_module
+
+    log = logging.getLogger("raiden_viz")
+    monkeypatch.setattr(log, "handlers", [])          # simulate an unconfigured app
+    monkeypatch.setattr(log, "level", logging.NOTSET)
+    assert log.getEffectiveLevel() == logging.WARNING, "expected the lastResort default"
+
+    app_module._configure_logging()
+
+    assert log.handlers, "no handler installed"
+    assert log.getEffectiveLevel() == logging.INFO
+    # catalog.py logs on a CHILD logger, which must inherit this.
+    assert logging.getLogger("raiden_viz.catalog").isEnabledFor(logging.INFO)
+
+
+def test_configure_logging_is_idempotent(monkeypatch):
+    import logging
+
+    from raiden_viz import app as app_module
+
+    log = logging.getLogger("raiden_viz")
+    monkeypatch.setattr(log, "handlers", [])
+    app_module._configure_logging()
+    app_module._configure_logging()
+    assert len(log.handlers) == 1, "duplicate handlers would double every log line"
+
+
+def test_configure_logging_honours_the_env_override(monkeypatch):
+    import logging
+
+    from raiden_viz import app as app_module
+
+    log = logging.getLogger("raiden_viz")
+    monkeypatch.setattr(log, "handlers", [])
+    monkeypatch.setattr(app_module.config, "LOG_LEVEL", "WARNING")
+    app_module._configure_logging()
+    assert log.getEffectiveLevel() == logging.WARNING
