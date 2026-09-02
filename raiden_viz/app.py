@@ -5,6 +5,7 @@ routes are source-scoped: /api/sources/{sid}/...
 """
 
 import logging
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -13,9 +14,38 @@ from fastapi.staticfiles import StaticFiles
 
 from . import cache, catalog, config, contrib, raiden_teachers, sources
 
-app = FastAPI(title="YAM Datasets Viewer", version="0.3.0")
-
 logger = logging.getLogger("raiden_viz")
+
+
+def _warm_catalog() -> None:
+    """Start every source's deep build so a cold cache is not a user's problem.
+
+    start_deep is idempotent (it no-ops on a running or fresh card) and returns
+    immediately, spawning one daemon thread per source — so this cannot delay
+    startup or the health check. Cards restored from the derived tier are already
+    good, so this is a no-op for them until their TTL expires.
+    """
+    try:
+        available = sources.get_sources(config.SOURCES)
+        for spec in config.SOURCES:
+            src = available.get(spec["id"])
+            if src is not None:
+                _CATALOG.start_deep(spec["id"], src)
+        logger.info("catalog warmup started for %d source(s)", len(available))
+    except Exception:
+        # Warmup is an optimisation. A container that cannot warm its cache must
+        # still serve, so this can never be fatal.
+        logger.exception("catalog warmup failed")
+
+
+@asynccontextmanager
+async def _lifespan(_app):
+    if config.WARM_CATALOG_ON_START:
+        _warm_catalog()
+    yield
+
+
+app = FastAPI(title="YAM Datasets Viewer", version="0.3.0", lifespan=_lifespan)
 
 _STATIC = Path(__file__).resolve().parent.parent / "static"
 _CATALOG = catalog.CatalogBuilder()
