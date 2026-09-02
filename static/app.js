@@ -230,6 +230,10 @@ function failBadge(msg) {
   return `<span class="cat-badge failed" title="${esc(short)}">⚠ build failed</span>`;
 }
 
+// How often to ask whether a clip has finished decoding. Decodes run minutes, so
+// this only needs to be fast enough that a ready clip does not feel delayed.
+const CLIP_POLL_MS = 1500;
+
 function annBadge(a) {
   const map = {
     yes: ["ann-yes", "✓ annotations"],
@@ -1570,9 +1574,14 @@ function makeVideoTile(c) {
   tile.appendChild(label);
   tile.appendChild(overlay);
 
-  const url =
-    `${apiBase()}/tasks/${encodeURIComponent(state.task)}/episodes/${encodeURIComponent(state.episode)}` +
-    `/video?camera=${encodeURIComponent(c.name)}&eye=${state.eye}`;
+  const clipBase =
+    `${apiBase()}/tasks/${encodeURIComponent(state.task)}/episodes/${encodeURIComponent(state.episode)}`;
+  const clipQuery = `camera=${encodeURIComponent(c.name)}&eye=${state.eye}`;
+  const url = `${clipBase}/video?${clipQuery}`;
+  const statusUrl = `${clipBase}/video/status?${clipQuery}`;
+  // Which episode this tile was mounted for, so a poll that outlives a navigation
+  // stops instead of loading a clip into a torn-down tile.
+  const mountedTask = state.task, mountedEpisode = state.episode;
 
   // Projection params for this camera, if the source provided EE traces.
   const proj = (state.detail && state.detail.ee_traces && state.detail.ee_traces.cameras)
@@ -1604,8 +1613,48 @@ function makeVideoTile(c) {
     overlay.appendChild(el("div", "cam-msg", "Could not decode this stream"));
     overlay.appendChild(el("div", "cam-sub", c.name));
   };
-  video.src = url;
-  video.load();
+
+  const failWith = (msg) => {
+    overlay.className = "cam-overlay err";
+    overlay.innerHTML = "";
+    overlay.appendChild(el("div", "cam-icon"));
+    overlay.appendChild(el("div", "cam-msg", msg));
+    overlay.appendChild(el("div", "cam-sub", c.name));
+  };
+
+  // Wait for the DECODE, then hand the clip to the element. Pointing video.src
+  // straight at /video puts a multi-minute transcode (cross-region download plus
+  // an ffmpeg pass) on the request the browser is blocked on, and the load
+  // balancer's 60s idle timeout severs it — which the element reports through
+  // onerror as "Could not decode this stream", a decode error for a timeout, while
+  // the decode goes on to succeed server-side. See raiden_viz/clips.py.
+  (async () => {
+    for (;;) {
+      if (state.task !== mountedTask || state.episode !== mountedEpisode) return;
+      let r;
+      try {
+        r = await fetch(statusUrl);
+      } catch (_) {
+        failWith("Could not reach the server");
+        return;
+      }
+      if (!r.ok) {
+        // The server distinguishes a missing camera (404) from a stub file with no
+        // video in it (422), so show what it said rather than a generic failure.
+        let msg = `Could not decode this stream (${r.status})`;
+        try { msg = (await r.json()).detail || msg; } catch (_) {}
+        failWith(msg);
+        return;
+      }
+      const st = await r.json();
+      if (st.ready) {
+        video.src = url;   // now a cache hit, so this returns promptly
+        video.load();
+        return;
+      }
+      await new Promise((done) => setTimeout(done, CLIP_POLL_MS));
+    }
+  })();
 
   state.tiles.push(tileState);
   return tile;

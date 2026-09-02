@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import cache, catalog, config, contrib, raiden_teachers, sources
+from . import cache, catalog, clips, config, contrib, raiden_teachers, sources
 
 logger = logging.getLogger("raiden_viz")
 
@@ -70,6 +70,12 @@ app = FastAPI(title="YAM Datasets Viewer", version="0.3.0", lifespan=_lifespan)
 
 _STATIC = Path(__file__).resolve().parent.parent / "static"
 _CATALOG = catalog.CatalogBuilder()
+_CLIPS = clips.ClipJobs()
+
+# Adapter failures the frontend should tell apart: a camera that is not there at all
+# versus one whose .svo2 is a stub header with no recorded video in it. Anything else
+# is a genuine decode fault and reports as 500.
+_CLIP_ERROR_STATUS = {"FileNotFoundError": 404, "ValueError": 422}
 _CONTRIB = contrib.ContribBuilder()
 _TEACHERS = raiden_teachers.TeacherBuilder()
 
@@ -367,6 +373,30 @@ def episode_video(sid: str, task: str, episode: str, camera: str, eye: str = Que
     if url:
         return RedirectResponse(url, status_code=302)
     return FileResponse(mp4, media_type="video/mp4", filename=f"{camera}_{eye}.mp4")
+
+
+@app.get("/api/sources/{sid}/tasks/{task}/episodes/{episode}/video/status")
+def episode_video_status(sid: str, task: str, episode: str, camera: str,
+                         eye: str = Query("left")):
+    """Whether one clip is decoded yet — starting the decode if it has not begun.
+
+    The decode CANNOT happen inside the /video request. It takes minutes (~2.5 for a
+    100 MB .svo2: a cross-region download plus an ffmpeg pass) and the load
+    balancer's idle timeout is 60s, so the browser's connection is severed long
+    first — which a <video> element renders as "Could not decode this stream", a
+    decode error for what is actually a timeout, while the decode goes on to finish
+    on the server and lands in the derived tier unused.
+
+    So the frontend polls this and only sets video.src once ready, by which point
+    /video resolves from cache. /video itself is unchanged and still works directly.
+    """
+    src = _src(sid)
+    key = clips.job_key(sid, task, episode, camera, eye)
+    state = _CLIPS.ensure(key, lambda: src.video_path(task, episode, camera, eye))
+    if state["error"]:
+        raise HTTPException(_CLIP_ERROR_STATUS.get(state["error_type"], 500),
+                            state["error"])
+    return {"ready": state["ready"], "decoding": state["decoding"]}
 
 
 @app.get("/api/sources/{sid}/tasks/{task}/episodes/{episode}/calib")
