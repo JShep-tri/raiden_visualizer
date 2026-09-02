@@ -90,3 +90,34 @@ def test_no_remote_calls_when_tier_is_off(cache_dir, monkeypatch, fake_s3):
     assert out.read_bytes() == b"video"
     assert cache.exists("clip.mp4") is True
     assert cache.remote_url("clip.mp4") is None
+
+
+# --- local-only artifacts -------------------------------------------------
+#
+# The derived tier is for things that are EXPENSIVE TO PRODUCE. A raiden .svo2 is
+# not produced at all — it is a byte-for-byte copy of a source object that already
+# exists in tri-ml-datasets-uw2, downloaded only as the input to the transcode.
+# Publishing it duplicated ~2.8 GB of source data into the derived bucket (a third
+# of it) to save a re-download in the narrow case where the MP4 expired but the
+# source did not. The yam adapter already treats its MCAP this way.
+
+
+def test_local_only_artifact_is_not_uploaded(cache_dir, remote):
+    cache.get_or_create("big.svo2", lambda dst: dst.write_bytes(b"src"), remote=False)
+    assert "derived/big.svo2" not in remote.objects, "published a local-only artifact"
+
+
+def test_local_only_artifact_is_not_fetched_from_remote(cache_dir, remote):
+    """It must not read the tier either — otherwise old objects keep being pulled."""
+    remote.objects["derived/big.svo2"] = b"stale"
+    made = []
+    out = cache.get_or_create("big.svo2", lambda dst: (made.append(1), dst.write_bytes(b"fresh"))[1],
+                              remote=False)
+    assert made == [1], "used the remote tier instead of producing locally"
+    assert out.read_bytes() == b"fresh"
+
+
+def test_default_still_publishes(cache_dir, remote):
+    """Regression guard: the expensive derivatives must keep surviving redeploys."""
+    cache.get_or_create("clip.mp4", lambda dst: dst.write_bytes(b"video"))
+    assert remote.objects["derived/clip.mp4"] == b"video"
