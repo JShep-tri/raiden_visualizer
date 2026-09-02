@@ -65,6 +65,16 @@ def cheap_card(spec: dict, src) -> dict:
         "bucket": src.bucket, "prefix": src.prefix,
         "num_tasks": ov.get("num_tasks"), "num_episodes": ov.get("num_episodes"),
         "stations": ov.get("stations", []),
+        # Top tasks belong HERE, not in the deep pass. overview() already counted
+        # episodes per task exactly, from the listing, and returns them sorted
+        # descending — so these stay correct even when the deep stats pass samples.
+        # Deriving them from the sampled episode records instead would have shown a
+        # task's episode count as its sample count. `_eps` is overview's private
+        # episode list; keep it off the card.
+        "top_tasks": [
+            {"task": t.get("task"), "episodes": t.get("episodes")}
+            for t in (ov.get("tasks") or [])[:10]
+        ],
     }
 
 
@@ -178,17 +188,30 @@ class CatalogBuilder:
                     self._deep[sid] = phase1
             # Phase 2 — full stats: reuse the source's own scan machinery. stats(full)
             # reads every episode's cheap record (duration/frames/cameras/etc).
-            st = src.stats(full=True)
+            # SAMPLED, not full. A full pass reads every episode: on the largest
+            # source that was ~51 minutes of cross-region round trips for numbers
+            # nobody needs to the episode. _stat_pairs subsamples evenly per task
+            # down to STATS_MAX, and small sources (<= STATS_MAX) are still read
+            # whole, so they stay exact. The counts people actually read —
+            # num_episodes, num_tasks, top_tasks — come from the listing pass in
+            # cheap_card and are unaffected either way.
+            st = src.stats(full=False)
             eps = st.get("episodes", [])
             durs = [e["duration_s"] for e in eps if e.get("duration_s")]
-            total_hours = round(sum(durs) / 3600.0, 1) if durs else None
+            # EXTRAPOLATE when sampled. total_hours is the headline duration on the
+            # card and is summed into the landing page's "Hours" tile, so summing a
+            # 1200-episode sample of a 200k-episode source would under-report it by
+            # ~99.5% — silently. Scale the sampled mean up to the true count instead;
+            # `sampled` rides along on the card so the UI can mark it estimated.
+            total_hours = None
+            if durs:
+                mean_s = sum(durs) / len(durs)
+                if st.get("sampled") and st.get("total_episodes"):
+                    total_hours = round(mean_s * st["total_episodes"] / 3600.0, 1)
+                else:
+                    total_hours = round(sum(durs) / 3600.0, 1)
             ann = _probe_annotations(src, cheap)
             cams = _sample_cameras(src)
-            # Per-task episode counts (top tasks) from the scan records.
-            per_task: dict[str, int] = {}
-            for e in eps:
-                per_task[e.get("task", "?")] = per_task.get(e.get("task", "?"), 0) + 1
-            top_tasks = sorted(per_task.items(), key=lambda kv: kv[1], reverse=True)[:10]
             deep = {
                 **cheap,
                 "cameras": cams,
@@ -198,10 +221,14 @@ class CatalogBuilder:
                 "total_episodes_scanned": st.get("total_episodes"),
                 "sampled": st.get("sampled", False),
                 "total_hours": total_hours,
+                # min/max are bounds of the SCANNED episodes, so under sampling
+                # they under-state the true range (the longest episode may not have
+                # been read). Nothing renders them today; `sampled` says which case
+                # this is. The average is unbiased under even subsampling.
                 "duration_min_s": round(min(durs), 1) if durs else None,
                 "duration_max_s": round(max(durs), 1) if durs else None,
                 "duration_avg_s": round(sum(durs) / len(durs), 1) if durs else None,
-                "top_tasks": [{"task": t, "episodes": n} for t, n in top_tasks],
+                # top_tasks arrives via **cheap — exact, from the listing pass.
                 "built_ok": True, "building": False,
                 "built_at": time.time(),
             }

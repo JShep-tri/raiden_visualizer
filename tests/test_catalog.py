@@ -459,3 +459,87 @@ def test_configure_logging_honours_the_env_override(monkeypatch):
     monkeypatch.setattr(app_module.config, "LOG_LEVEL", "WARNING")
     app_module._configure_logging()
     assert log.getEffectiveLevel() == logging.WARNING
+
+
+# --- sampled stats: fast, but the numbers must stay honest ----------------
+
+
+class BigSource:
+    """A source large enough that the deep pass subsamples it."""
+
+    TOTAL = 200_000
+    SAMPLE = 1_200
+    DUR = 40.0                      # seconds per episode, uniform for easy maths
+
+    def __init__(self):
+        self.spec = {"id": "big", "label": "Big", "kind": "yam"}
+        self.bucket = "b"
+        self.prefix = "p"
+        self.full_calls = []
+
+    def overview(self):
+        # Exact per-task counts, sorted descending, as the real overview() returns.
+        tasks = [{"task": f"t{i}", "episodes": n, "_eps": ["x"] * n}
+                 for i, n in enumerate([90_000, 60_000, 50_000])]
+        return {"num_tasks": 3, "num_episodes": self.TOTAL, "stations": [], "tasks": tasks}
+
+    def stats(self, full=False):
+        self.full_calls.append(full)
+        eps = [{"task": "t0", "duration_s": self.DUR} for _ in range(self.SAMPLE)]
+        return {"num_episodes": self.SAMPLE, "total_episodes": self.TOTAL,
+                "scanned": self.SAMPLE, "sampled": True, "episodes": eps}
+
+
+def test_catalog_asks_for_a_SAMPLED_pass(builder):
+    """Regression guard: full=True was ~51 minutes on the largest source."""
+    src = BigSource()
+    builder.build_deep("big", src)
+    assert src.full_calls == [False], f"deep pass asked for full={src.full_calls}"
+
+
+def test_sampled_hours_are_extrapolated_not_summed(builder):
+    """Summing a 1,200-episode sample of a 200,000-episode source would under-report
+    the card's headline duration by ~99.4%."""
+    src = BigSource()
+    builder.build_deep("big", src)
+    card = builder.get_card("big")
+
+    summed = src.SAMPLE * src.DUR / 3600.0                 # the wrong answer
+    expected = src.TOTAL * src.DUR / 3600.0                 # mean x true count
+    assert card["sampled"] is True
+    assert card["total_hours"] == round(expected, 1)
+    assert card["total_hours"] > summed * 100, "hours look summed, not extrapolated"
+
+
+def test_top_tasks_stay_EXACT_under_sampling(builder):
+    """They come from the listing pass, not the sampled records — otherwise a task
+    with 90,000 episodes would report its sample count instead."""
+    src = BigSource()
+    builder.build_deep("big", src)
+    top = builder.get_card("big")["top_tasks"]
+
+    assert [t["task"] for t in top] == ["t0", "t1", "t2"]
+    assert [t["episodes"] for t in top] == [90_000, 60_000, 50_000]
+
+
+def test_top_tasks_never_leak_the_private_episode_list(builder):
+    builder.build_deep("big", BigSource())
+    for t in builder.get_card("big")["top_tasks"]:
+        assert set(t) == {"task", "episodes"}, f"unexpected keys: {sorted(t)}"
+
+
+def test_small_source_hours_are_summed_exactly(builder):
+    """A source under STATS_MAX is read whole, so nothing is estimated."""
+
+    class SmallSource(BigSource):
+        def stats(self, full=False):
+            self.full_calls.append(full)
+            eps = [{"task": "t0", "duration_s": 60.0} for _ in range(3)]
+            return {"num_episodes": 3, "total_episodes": 3, "scanned": 3,
+                    "sampled": False, "episodes": eps}
+
+    builder.build_deep("small", SmallSource())
+    card = builder.get_card("small")
+    assert card["sampled"] is False
+    # 3 x 60s = 180s = 0.05h, rounded to one decimal by build_deep.
+    assert card["total_hours"] == 0.1

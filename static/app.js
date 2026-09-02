@@ -255,7 +255,11 @@ async function renderCatalog() {
     ["Datasets", a.num_datasets],
     ["Episodes", (a.total_episodes || 0).toLocaleString()],
     ["Tasks", (a.total_tasks || 0).toLocaleString()],
-    ["Hours", a.total_hours ? a.total_hours.toLocaleString() : "—"],
+    // Sums per-card hours, which are estimates for any sampled source — so the
+    // total is an estimate too the moment one of them is.
+    ["Hours", a.total_hours
+      ? `${data.datasets.some((d) => d.sampled) ? "~" : ""}${a.total_hours.toLocaleString()}`
+      : "—"],
     ["With annotations", a.with_annotations],
   ].map(([k, v]) => `<div class="cat-stat"><div class="cat-stat-v">${v}</div><div class="cat-stat-k">${k}</div></div>`).join("");
 
@@ -266,7 +270,15 @@ async function renderCatalog() {
     const fmt = CAT_KIND_LABEL[c.kind] || c.kind || "";
     const building = c.building;
     const failed = c.built_ok === false;
-    const hours = c.total_hours != null ? `${c.total_hours} h` : (building ? "…" : "—");
+    // A sampled source's hours are EXTRAPOLATED from the sampled mean, not summed,
+    // so prefix them. Presenting an estimate as a measurement is the one thing the
+    // sampling trade-off must not do.
+    const hours = c.total_hours != null
+      ? `${c.sampled ? "~" : ""}${c.total_hours} h`
+      : (building ? "…" : "—");
+    const hoursTitle = c.sampled
+      ? ` title="Estimated: mean of ${(c.scanned || 0).toLocaleString()} sampled episodes, scaled to ${(c.num_episodes || 0).toLocaleString()}"`
+      : "";
     const cams = (c.cameras && c.cameras.length) ? c.cameras.join(", ") : (building ? "…" : "—");
     card.innerHTML = `
       <div class="cat-card-head">
@@ -276,7 +288,7 @@ async function renderCatalog() {
       <div class="cat-metrics">
         <div><b>${(c.num_episodes ?? "—").toLocaleString?.() ?? c.num_episodes ?? "—"}</b><span>episodes</span></div>
         <div><b>${c.num_tasks ?? "—"}</b><span>tasks</span></div>
-        <div><b>${hours}</b><span>duration</span></div>
+        <div${hoursTitle}><b>${hours}</b><span>duration</span></div>
       </div>
       <div class="cat-row">${building
         ? '<span class="cat-badge building">⟳ computing…</span>'
