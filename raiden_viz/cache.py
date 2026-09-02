@@ -132,13 +132,18 @@ def remote_url(cache_name: str) -> str | None:
     )
 
 
-def get_or_create(cache_name: str, produce) -> Path:
+def get_or_create(cache_name: str, produce, remote: bool = True) -> Path:
     """Return cached file at ``cache_name``, invoking ``produce(path)`` to
     build it on a miss. ``produce`` must write the file at the given path.
 
     Three tiers, cheapest first: local disk, the derived S3 bucket, then an actual
     decode. A fresh decode is published to the derived tier so the next container --
     or the next deploy -- skips it entirely.
+
+    ``remote=False`` keeps an artifact local: the derived tier is neither read nor
+    written for it. Use it for anything that is not expensive to PRODUCE -- notably
+    a downloaded source object, which is already durable in its own bucket, so
+    publishing it duplicates source data to buy back only a re-download.
     """
     dest = path_for(cache_name)
     if dest.exists() and dest.stat().st_size > 0:
@@ -152,7 +157,7 @@ def get_or_create(cache_name: str, produce) -> Path:
             return dest
         # Remote tier before decoding: a download is minutes cheaper than an ffmpeg
         # pass over an 880 MB MCAP, and survives redeploys.
-        if fetch_remote(cache_name, dest):
+        if remote and fetch_remote(cache_name, dest):
             _maybe_evict()
             return dest
         # Unique temp name (pid + time) so concurrent cold misses never clobber
@@ -160,7 +165,8 @@ def get_or_create(cache_name: str, produce) -> Path:
         tmp = dest.with_suffix(dest.suffix + f".tmp{os.getpid()}_{int(time.time()*1000)%100000}")
         produce(tmp)
         tmp.replace(dest)
-        push_remote(cache_name, dest)
+        if remote:
+            push_remote(cache_name, dest)
     _maybe_evict()
     return dest
 

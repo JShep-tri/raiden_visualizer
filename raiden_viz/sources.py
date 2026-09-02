@@ -411,9 +411,17 @@ class RaidenSource(Source):
             raise FileNotFoundError(f"camera not found: {camera}")
         if obj.size < 100_000:
             raise ValueError(f"camera '{camera}' has no recorded video (stub file)")
+        # LOCAL ONLY. This is the transcode's input, not its output: a
+        # byte-for-byte copy of an object that is already durable in the datasets
+        # bucket. Publishing it duplicated source data into the derived tier (~2.8 GB
+        # there, about a third of it) to buy back a re-download in the one case where
+        # the decoded MP4 expired but its source had not. The MP4 below IS published:
+        # that one costs minutes of ffmpeg to reproduce. Same split the yam adapter
+        # already makes with its MCAP, which it keeps as a temp file.
         svo_local = cache.get_or_create(
             f"{obj.etag}_{camera}.svo2",
             lambda dst: s3.download(key, dst, bucket=self.bucket),
+            remote=False,
         )
         return cache.get_or_create(
             f"{obj.etag}_{camera}_{eye}.mp4",
