@@ -129,6 +129,24 @@ DERIVED_URL_TTL = int(os.environ.get("RAIDEN_DERIVED_URL_TTL", "3600"))
 # INFO line, including the catalog warmup confirmation.
 LOG_LEVEL = os.environ.get("RAIDEN_LOG_LEVEL", "INFO").strip().upper()
 
+# How long a source's overview() is reused. It walks every task listing every
+# episode — roughly 130 paginated LIST calls cross-region on the largest source —
+# and nothing cached it, so every dataset click paid it again. Long enough that
+# browsing never re-lists, short enough that new episodes surface promptly.
+OVERVIEW_TTL_S = float(os.environ.get("RAIDEN_OVERVIEW_TTL_S", "300"))
+
+# Start every source's FULL per-episode scan at boot. That scan backs the episode
+# filter, and nothing started it: a user clicked the button and then watched it —
+# ~51 minutes on the largest source. Deploying at a quiet hour only helps if the
+# scan happens at that hour too.
+#
+# OFF by default, unlike the catalog warmup: this is hours of S3 work at every
+# boot, which is right for a deployed container and wrong for a laptop checkout.
+# Deployed environments opt in via RAIDEN_WARM_SCANS=1.
+WARM_SCANS_ON_START = os.environ.get("RAIDEN_WARM_SCANS", "0").strip().lower() in (
+    "1", "true", "yes",
+)
+
 WARM_CATALOG_ON_START = os.environ.get("RAIDEN_WARM_CATALOG", "1").strip().lower() not in (
     "0", "false", "no", "",
 )

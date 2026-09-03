@@ -543,3 +543,97 @@ def test_small_source_hours_are_summed_exactly(builder):
     assert card["sampled"] is False
     # 3 x 60s = 180s = 0.05h, rounded to one decimal by build_deep.
     assert card["total_hours"] == 0.1
+
+
+# --- scan warmup ----------------------------------------------------------
+#
+# The full per-episode scan backs the episode filter, and nothing started it at
+# boot: a USER clicked #filter-scan-btn and then watched it, which on the largest
+# source is ~51 minutes. Deploying at midnight is only useful if the scan happens
+# at midnight too.
+
+
+class ScannableSource:
+    def __init__(self, sid="s1", fails=False):
+        self.spec = {"id": sid, "label": "S", "kind": "yam"}
+        self.scans = 0
+        self.fails = fails
+
+    def scan_start(self):
+        if self.fails:
+            raise RuntimeError("listing blew up")
+        self.scans += 1
+        return {"running": True}
+
+
+def test_scan_warmup_starts_every_available_source(monkeypatch):
+    from raiden_viz import app as app_module
+    from raiden_viz import sources
+
+    a, b = ScannableSource("a"), ScannableSource("b")
+    monkeypatch.setattr(app_module.config, "SOURCES",
+                        [{"id": "a", "label": "A", "kind": "yam"},
+                         {"id": "b", "label": "B", "kind": "yam"}])
+    monkeypatch.setattr(sources, "get_sources", lambda _s: {"a": a, "b": b})
+
+    app_module._warm_scans()
+    assert (a.scans, b.scans) == (1, 1)
+
+
+def test_scan_warmup_skips_unregistered_sources(monkeypatch):
+    from raiden_viz import app as app_module
+    from raiden_viz import sources
+
+    a = ScannableSource("a")
+    monkeypatch.setattr(app_module.config, "SOURCES",
+                        [{"id": "a", "label": "A", "kind": "yam"},
+                         {"id": "gated", "label": "G", "kind": "yam"}])
+    monkeypatch.setattr(sources, "get_sources", lambda _s: {"a": a})
+    app_module._warm_scans()          # must not KeyError on the gated one
+    assert a.scans == 1
+
+
+def test_one_source_failing_does_not_stop_the_rest(monkeypatch, caplog):
+    """A container that cannot scan one source must still scan the others, and
+    must still serve."""
+    from raiden_viz import app as app_module
+    from raiden_viz import sources
+
+    bad, good = ScannableSource("bad", fails=True), ScannableSource("good")
+    monkeypatch.setattr(app_module.config, "SOURCES",
+                        [{"id": "bad", "label": "B", "kind": "yam"},
+                         {"id": "good", "label": "G", "kind": "yam"}])
+    monkeypatch.setattr(sources, "get_sources", lambda _s: {"bad": bad, "good": good})
+
+    with caplog.at_level("ERROR"):
+        app_module._warm_scans()      # must not raise
+    assert good.scans == 1, "one bad source stopped the others"
+    assert any("scan warmup" in r.message for r in caplog.records)
+
+
+def test_scan_warmup_is_OFF_by_default():
+    """~51 minutes of S3 work at every boot is right for a deployed container and
+    wrong for a laptop, so this one is opt-in — unlike the catalog warmup."""
+    from raiden_viz import config
+
+    assert config.WARM_SCANS_ON_START is False
+
+
+def test_lifespan_honours_the_scan_warmup_flag(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from raiden_viz import app as app_module
+
+    calls = []
+    monkeypatch.setattr(app_module, "_warm_scans", lambda: calls.append(1))
+    monkeypatch.setattr(app_module, "_warm_catalog", lambda: None)
+
+    monkeypatch.setattr(app_module.config, "WARM_SCANS_ON_START", False)
+    with TestClient(app_module.app):
+        pass
+    assert calls == []
+
+    monkeypatch.setattr(app_module.config, "WARM_SCANS_ON_START", True)
+    with TestClient(app_module.app):
+        pass
+    assert calls == [1]

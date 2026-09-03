@@ -58,11 +58,46 @@ def _configure_logging() -> None:
         log.addHandler(handler)
 
 
+def _warm_scans() -> None:
+    """Start every source's full per-episode scan at boot.
+
+    The scan backs the episode filter. Nothing started it before this: a user
+    clicked #filter-scan-btn and then watched it finish, which on the largest source
+    is ~51 minutes. Deploying at a quiet hour only helps if the scan runs then too.
+
+    scan_start is idempotent and returns immediately, spawning its own workers, so
+    this cannot delay startup or the health check.
+
+    Each source is guarded SEPARATELY: one source that cannot be listed must not
+    stop the others, and none of it may be fatal to startup.
+    """
+    try:
+        available = sources.get_sources(config.SOURCES)
+    except Exception:
+        logger.exception("scan warmup failed to resolve sources")
+        return
+    started = 0
+    for spec in config.SOURCES:
+        src = available.get(spec["id"])
+        if src is None:
+            continue
+        try:
+            src.scan_start()
+            started += 1
+        except Exception:
+            logger.exception("scan warmup failed for %s", spec["id"])
+    logger.info("scan warmup started for %d source(s)", started)
+
+
 @asynccontextmanager
 async def _lifespan(_app):
     _configure_logging()          # before the warmup, so its log line is visible
     if config.WARM_CATALOG_ON_START:
         _warm_catalog()
+    # After the catalog: its cards are what the landing page needs first, and since
+    # #6 sampled them they finish in seconds, where a scan runs for ~an hour.
+    if config.WARM_SCANS_ON_START:
+        _warm_scans()
     yield
 
 

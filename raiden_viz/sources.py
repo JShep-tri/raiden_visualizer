@@ -21,10 +21,11 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import cache, calib_overlay, fk, lerobot, robot_data, s3, svo, yam
+from . import cache, calib_overlay, config, fk, lerobot, robot_data, s3, svo, yam
 
 # In-flight/finished background stat scans, keyed by a per-source scan id. Held in
 # memory (a scan is cheap to restart and its per-episode records are disk-cached).
@@ -103,6 +104,10 @@ class Source:
         self.bucket = spec["bucket"]
         self.prefix = spec["prefix"].strip("/")
         self.spec = spec
+        # Memoised overview(): (built_at, value). Sources live in the module-level
+        # _SOURCES cache, so this survives for the life of the process.
+        self._overview_cached: tuple[float, dict] | None = None
+        self._overview_lock = threading.Lock()
 
     # ---- browsing (shared) ----
     def list_tasks(self) -> list[str]:
@@ -142,6 +147,27 @@ class Source:
 
     # ---- aggregates (shared, built on the above) ----
     def overview(self) -> dict:
+        """Cheap per-source facts, memoised for OVERVIEW_TTL_S.
+
+        _build_overview walks every task listing every episode — about 130 paginated
+        LIST calls cross-region on the largest source — and this is called on every
+        dataset click as well as by every catalog card build, so it must not be
+        recomputed each time.
+
+        Returns a SHALLOW COPY: the /overview route adds a "region" key to what it
+        gets back, and that must not accumulate on the cached object.
+        """
+        now = time.time()
+        with self._overview_lock:
+            cached = self._overview_cached
+            if cached is not None and now - cached[0] < config.OVERVIEW_TTL_S:
+                return dict(cached[1])
+        built = self._build_overview()
+        with self._overview_lock:
+            self._overview_cached = (now, built)
+        return dict(built)
+
+    def _build_overview(self) -> dict:
         tasks = self.list_tasks()
         per_task, total, stations = [], 0, set()
         for task in tasks:
